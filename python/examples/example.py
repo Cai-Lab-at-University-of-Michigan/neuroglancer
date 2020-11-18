@@ -1,59 +1,110 @@
 from __future__ import print_function
 
-import argparse
 import numpy as np
 
 import neuroglancer
-import neuroglancer.cli
+from tifffile import imread
+from skimage import io
+
+import webbrowser
+import time
+import os
+import matplotlib.pyplot as plt
+import PIL as pil
+import copy
 
 
-def add_example_layers(state):
-    a = np.zeros((3, 100, 100, 100), dtype=np.uint8)
-    ix, iy, iz = np.meshgrid(*[np.linspace(0, 1, n) for n in a.shape[1:]], indexing='ij')
-    a[0, :, :, :] = np.abs(np.sin(4 * (ix + iy))) * 255
-    a[1, :, :, :] = np.abs(np.sin(4 * (iy + iz))) * 255
-    a[2, :, :, :] = np.abs(np.sin(4 * (ix + iz))) * 255
+# Address
+neuroglancer.set_server_bind_address('127.0.0.1')
+neuroglancer.set_static_content_source(url='http://localhost:8080')
 
-    b = np.cast[np.uint32](np.floor(np.sqrt((ix - 0.5)**2 + (iy - 0.5)**2 + (iz - 0.5)**2) * 10))
-    b = np.pad(b, 1, 'constant')
-    dimensions = neuroglancer.CoordinateSpace(names=['x', 'y', 'z'],
-                                              units='nm',
-                                              scales=[10, 10, 10])
+# Data
+img = imread('sample.tif')
+img = img * 10 / 256
+img = img.astype('uint8')
+img = np.transpose(img, (1, 0, 2, 3))
 
-    state.dimensions = dimensions
-    state.layers.append(
-        name='a',
+img2 = copy.deepcopy(img)
+
+# Maximum projection
+# All Layers, axis = 0 for z-axis since tiff file is Z x X x Y for each RGB channel
+img2[0][:] = np.max(img2[0], axis=0)
+img2[1][:] = np.max(img2[1], axis=0)
+img2[2][:] = np.max(img2[2], axis=0)
+# +/- five layers
+img3 = copy.deepcopy(img)
+zSize = len(img3[0]) - 1
+numLayers = 5 # Constant, can change to select the number of layers to calculate z-projection
+# Red Channel
+for i in range(0, 136):
+    layerList = [] 
+    for j in range(0, numLayers):
+        layerList.append(img[0][max(0, i-numLayers+j)])
+    layerList.append(img[0][i])
+    for j in range(1, numLayers+1):
+        layerList.append(img[0][min(zSize, i+j)])
+    img3[0][i] = np.maximum.reduce(layerList)
+# Green Channel
+for i in range(0, 136):
+    layerList = [] 
+    for j in range(0, numLayers):
+        layerList.append(img[1][max(0, i-numLayers+j)])
+    layerList.append(img[1][i])
+    for j in range(1, numLayers+1):
+        layerList.append(img[1][min(zSize, i+j)])
+    img3[1][i] = np.maximum.reduce(layerList)
+# Blue Channel
+for i in range(0, 136):
+    layerList = [] 
+    for j in range(0, numLayers):
+        layerList.append(img[2][max(0, i-numLayers+j)])
+    layerList.append(img[2][i])
+    for j in range(1, numLayers+1):
+        layerList.append(img[2][min(zSize, i+j)])
+    img3[2][i] = np.maximum.reduce(layerList)
+
+# Viewer
+viewer = neuroglancer.Viewer()
+dimensions = neuroglancer.CoordinateSpace(
+    names=['x', 'y', 'z'],
+    units='nm',
+    scales=[10, 10, 10])
+
+with viewer.txn() as s:
+    s.dimensions = dimensions
+    s.layers.append(
+        name='image',
         layer=neuroglancer.LocalVolume(
-            data=a,
-            dimensions=neuroglancer.CoordinateSpace(names=['c^', 'x', 'y', 'z'],
-                                                    units=['', 'nm', 'nm', 'nm'],
-                                                    scales=[1, 10, 10, 10]),
-            voxel_offset=(0, 20, 30, 15),
+            data=img,
+            dimensions=neuroglancer.CoordinateSpace(
+                names=['c^', 'x', 'y', 'z'],
+                units=['', 'nm', 'nm', 'nm'],
+                scales=[1, 10, 10, 10]),
+            voxel_offset=(0, 0, 0, 0),
         ),
-        shader="""
+        shader='''
 void main() {
   emitRGB(vec3(toNormalized(getDataValue(0)),
                toNormalized(getDataValue(1)),
                toNormalized(getDataValue(2))));
-}
-""",
-    )
-    state.layers.append(
-        name='b',
+}        
+''')
+    s.layers.append(
+        name='image',
         layer=neuroglancer.LocalVolume(
-            data=b,
-            dimensions=dimensions,
+            data=img3,
+            dimensions=neuroglancer.CoordinateSpace(
+                names=['c^', 'x', 'y', 'z'],
+                units=['', 'nm', 'nm', 'nm'],
+                scales=[1, 10, 10, 10]),
+            voxel_offset=(0, 0, 0, 0),
         ),
-    )
-    return a, b
+        shader='''
+void main() {
+  emitRGB(vec3(toNormalized(getDataValue(0)),
+               toNormalized(getDataValue(1)),
+               toNormalized(getDataValue(2))));
+}        
+''')
 
-
-if __name__ == '__main__':
-    ap = argparse.ArgumentParser()
-    neuroglancer.cli.add_server_arguments(ap)
-    args = ap.parse_args()
-    neuroglancer.cli.handle_server_arguments(args)
-    viewer = neuroglancer.Viewer()
-    with viewer.txn() as s:
-        a, b = add_example_layers(s)
-    print(viewer)
+print(viewer)
