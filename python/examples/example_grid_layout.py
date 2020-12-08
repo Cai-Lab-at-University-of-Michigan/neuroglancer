@@ -20,6 +20,7 @@ if __name__ == '__main__':
         s.layers['ground_truth'] = neuroglancer.SegmentationLayer(
             source='precomputed://gs://neuroglancer-public-data/flyem_fib-25/ground_truth',
         )
+        print(s.layers)
         s.layout = neuroglancer.row_layout([
             neuroglancer.column_layout([
                 neuroglancer.LayerGroupViewer(layers=['image', 'ground_truth']),

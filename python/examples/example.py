@@ -15,8 +15,8 @@ import copy
 
 
 # Address
-neuroglancer.set_server_bind_address('127.0.0.1')
-neuroglancer.set_static_content_source(url='http://localhost:8080')
+# neuroglancer.set_server_bind_address('127.0.0.1')
+# neuroglancer.set_static_content_source(url='http://localhost:8080')
 
 # Data
 img = imread('sample.tif')
@@ -62,6 +62,9 @@ for i in range(0, 136):
     for j in range(1, numLayers+1):
         layerList.append(img[2][min(zSize, i+j)])
     img3[2][i] = np.maximum.reduce(layerList)
+
+# for i in range(0,136):
+#     img3[:,i,:,:] = np.amax(img, axis=1)
 
 # Viewer
 viewer = neuroglancer.Viewer()

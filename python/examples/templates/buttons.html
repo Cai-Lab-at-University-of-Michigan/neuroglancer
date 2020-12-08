@@ -1,0 +1,26 @@
+<!-- index.html -->
+<head>
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.3.1/jquery.min.js"></script>
+  </head>
+  <body>
+    <label for="projectionCount">Number of layers (1-136):</label>
+    <input type="number" id="projection" name="projectionCount" min="1" max="136" value="1">
+    <button id='myButton' type="button">Submit</button>
+    <script>
+      $('#myButton').click(function() {
+        let textBox = document.getElementById("projection").value;
+          $.ajax({
+                type:'POST',
+                url: "{{ url_for('submit')}}",
+                dataType: "text",
+                contentType: "application/json",
+                data: textBox,
+                success: function(response){
+                   console.log(response);
+                   div = $("<div>").html('<a href="' + response + '" target="_blank">' + response + '</a>');
+                  $("body").append(div); 
+                }
+          });
+      });
+    </script>
+  </body>
