@@ -49,6 +49,9 @@ import { CompoundTrackable } from "#src/util/trackable.js";
 import type { InputEventBindings } from "#src/viewer.js";
 import { VIEWER_UI_CONFIG_OPTIONS } from "#src/viewer.js";
 
+import { DrawingTool } from "#src/custom/drawing_tool.js";
+import { setupDrawingToolMessageHandler } from "#src/custom/drawing_tool_handler.js";
+
 function makeTrackableBasedEventActionMaps(
   inputEventBindings: InputEventBindings,
 ) {
@@ -118,6 +121,12 @@ const viewer = ((<any>window).viewer = makeDefaultViewer({
   resetStateWhenEmpty: false,
   credentialsManager: new CachingCredentialsManager(credentialsManager),
 }));
+
+const drawingTool = new DrawingTool(viewer);
+viewer.registerDisposer(drawingTool);
+(<any>window).drawingTool = drawingTool;
+
+setupDrawingToolMessageHandler(drawingTool);
 
 const pythonDataSource = viewer.dataSourceProvider.dataSources.get(
   "python",

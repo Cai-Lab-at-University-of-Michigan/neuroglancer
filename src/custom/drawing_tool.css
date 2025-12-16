@@ -1,0 +1,17 @@
+.neuroglancer-drawing-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  z-index: 100;
+}
+
+.neuroglancer-drawing-canvas.brush { cursor: crosshair; }
+.neuroglancer-drawing-canvas.eraser { cursor: crosshair; }
+.neuroglancer-drawing-canvas.rect { cursor: crosshair; }
+.neuroglancer-drawing-canvas.ellipse { cursor: crosshair; }
+.neuroglancer-drawing-canvas.line { cursor: crosshair; }
+
+.neuroglancer-rendered-data-panel {
+  cursor: inherit !important;
+}
