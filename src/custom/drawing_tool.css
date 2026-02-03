@@ -7,11 +7,7 @@
 }
 
 .neuroglancer-drawing-canvas.brush { cursor: crosshair; }
-.neuroglancer-drawing-canvas.eraser { cursor: crosshair; }
 .neuroglancer-drawing-canvas.rect { cursor: crosshair; }
 .neuroglancer-drawing-canvas.ellipse { cursor: crosshair; }
 .neuroglancer-drawing-canvas.line { cursor: crosshair; }
 
-.neuroglancer-rendered-data-panel {
-  cursor: inherit !important;
-}

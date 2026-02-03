@@ -1,15 +1,54 @@
 import type { DrawingTool } from "#src/custom/drawing_tool.js";
 import { ALLOWED_UNITS } from "#src/widget/scale_bar.js";
 
-interface StrokePoint { x: number; y: number; z: number; }
-interface BaseStroke { mode: string; color: string; physicalSize: number; voxelSizes: number[] | null; timestamp: string; }
-interface BrushStroke extends BaseStroke { mode: "brush" | "eraser"; points: StrokePoint[]; }
-interface PromptPoint { mode: "point"; point: StrokePoint; polarity: "positive" | "negative"; }
-interface PromptBBox { mode: "bbox"; startPoint: StrokePoint; endPoint: StrokePoint; polarity: "positive" | "negative"; }
-interface PromptScribble { mode: "scribble"; points: StrokePoint[]; polarity: "positive" | "negative"; }
-interface PromptLasso { mode: "lasso"; points: StrokePoint[]; polarity: "positive" | "negative"; }
+interface StrokePoint {
+  x: number;
+  y: number;
+  z: number;
+}
+
+interface BaseStroke {
+  mode: string;
+  color: string;
+  physicalSize: number;
+  voxelSizes: number[] | null;
+  timestamp: string;
+}
+
+interface BrushStroke extends BaseStroke {
+  mode: "brush";
+  points: StrokePoint[];
+}
+
+interface PromptPoint {
+  mode: "point";
+  point: StrokePoint;
+  polarity: "positive" | "negative";
+}
+
+interface PromptBBox {
+  mode: "bbox";
+  startPoint: StrokePoint;
+  endPoint: StrokePoint;
+  polarity: "positive" | "negative";
+}
+
+interface PromptScribble {
+  mode: "scribble";
+  points: StrokePoint[];
+  polarity: "positive" | "negative";
+}
+
+interface PromptLasso {
+  mode: "lasso";
+  points: StrokePoint[];
+  polarity: "positive" | "negative";
+}
+
 type Prompt = PromptPoint | PromptBBox | PromptScribble | PromptLasso;
 type Stroke = BrushStroke;
+
+const DATA_PANEL_SELECTOR = ".neuroglancer-rendered-data-panel";
 
 const strokeData: Stroke[] = [];
 const promptData: Prompt[] = [];
@@ -22,10 +61,36 @@ let lastScaleBarLength: number | null = null;
 const minPixelStep = 0.75;
 const lastScreen = { x: NaN, y: NaN };
 
+function isValidPoint(p: StrokePoint): boolean {
+  return isFinite(p.x) && isFinite(p.y) && isFinite(p.z);
+}
+
+function isInDataBounds(viewer: any): boolean {
+  const pos = viewer?.mouseState?.position;
+  const bounds = viewer?.coordinateSpace?.value?.bounds;
+  if (!pos || pos.length < 3 || !bounds) return false;
+  const { lowerBounds, upperBounds } = bounds;
+  for (let i = 0; i < 3; i++) {
+    if (!isFinite(pos[i])) return false;
+    if (pos[i] < lowerBounds[i] || pos[i] >= upperBounds[i]) return false;
+  }
+  return true;
+}
+
+function pushUniquePoint(arr: StrokePoint[], p: StrokePoint) {
+  const last = arr[arr.length - 1];
+  if (!last || last.x !== p.x || last.y !== p.y || last.z !== p.z) {
+    arr.push(p);
+  }
+}
+
+function isOnDataPanel(e: MouseEvent): boolean {
+  return !!(e.target as HTMLElement).closest(DATA_PANEL_SELECTOR);
+}
+
 function voxelPoint(viewer: any): StrokePoint {
-  const s = viewer?.mouseState;
-  const p = s?.position;
-  if (!p || p.length < 3) return { x: NaN, y: NaN, z: NaN }; 
+  const p = viewer?.mouseState?.position;
+  if (!p || p.length < 3) return { x: NaN, y: NaN, z: NaN };
   return { x: p[0], y: p[1], z: p[2] };
 }
 
@@ -38,11 +103,7 @@ function safeRedraw(viewer: any) {
   viewer?.display?.scheduleRedraw?.();
 }
 
-function convertLength(
-  value: number,
-  fromUnit: string,
-  toUnit: string
-): number {
+function convertLength(value: number, fromUnit: string, toUnit: string): number {
   const from = ALLOWED_UNITS.find(u => u.unit === fromUnit);
   const to = ALLOWED_UNITS.find(u => u.unit === toUnit);
   if (!from || !to) throw new Error(`Unsupported unit conversion: ${fromUnit} to ${toUnit}`);
@@ -51,16 +112,14 @@ function convertLength(
 
 function calculatePhysicalSizePerPixel(viewer: any): number | null {
   if (!viewer?.display?.panels) return null;
-
   for (const panel of viewer.display.panels) {
     const scaleBars = panel?.scaleBars?.scaleBars;
     if (!scaleBars) continue;
-
     for (const scaleBar of scaleBars) {
       const dimensions = scaleBar?.dimensions;
       if (dimensions?.physicalSizePerPixel) {
-        const unit = dimensions.physicalUnit ?? "µm";
-        return convertLength(dimensions.physicalSizePerPixel, unit, "µm") * 1e6;
+        const baseUnit = dimensions.physicalBaseUnit ?? "m";
+        return convertLength(dimensions.physicalSizePerPixel, baseUnit, "µm");
       }
     }
   }
@@ -69,11 +128,9 @@ function calculatePhysicalSizePerPixel(viewer: any): number | null {
 
 function getScaleBarPhysicalLength(viewer: any): number | null {
   if (!viewer?.display?.panels) return null;
-
   for (const panel of viewer.display.panels) {
     const scaleBars = panel?.scaleBars?.scaleBars;
     if (!scaleBars) continue;
-
     for (const scaleBar of scaleBars) {
       const dimensions = scaleBar?.dimensions;
       if (dimensions?.physicalLength) {
@@ -89,44 +146,44 @@ function sendScaleBarUpdate(viewer: any) {
   const scaleBarLength = getScaleBarPhysicalLength(viewer);
   if (scaleBarLength !== null && scaleBarLength !== lastScaleBarLength) {
     lastScaleBarLength = scaleBarLength;
-    window.parent.postMessage({
-      type: "scale_bar_update",
-      scaleBarLength: scaleBarLength
-    }, "*");
+    window.parent.postMessage({ type: "scale_bar_update", scaleBarLength }, "*");
   }
 }
 
 function calculatePhysicalSizePerVoxel(viewer: any): number[] | null {
   if (!viewer?.display?.panels) return null;
-
-  for (const panel of viewer.display.panels) {
-    const sv = panel?.sliceView;
-    if (!sv) continue;
-
-    for (const managed of sv.visibleLayerList ?? []) {
-      if (managed?.userLayer?.type !== "image") continue;
-
-      const info = sv.visibleLayers?.get?.(managed).displayDimensionRenderInfo;
-      const scales = info?.displayDimensionScales;
-      const units = info?.displayDimensionUnits;
-      if (!scales || !units) continue;
-
-      const scalesArray = Array.from(scales);
-      const unitsArray = Array.from(units);
-
-      const converted = scalesArray.map((v, i) =>
-        convertLength(v as number, unitsArray[i] as string ?? "m", "µm")
-      );
-      return converted;
+  const preferredTypes = ["image", null];
+  for (const filterType of preferredTypes) {
+    for (const panel of viewer.display.panels) {
+      const sv = panel?.sliceView;
+      if (!sv) continue;
+      for (const managed of sv.visibleLayerList ?? []) {
+        if (filterType && managed?.userLayer?.type !== filterType) continue;
+        const info = sv.visibleLayers?.get?.(managed)?.displayDimensionRenderInfo;
+        const scales = info?.displayDimensionScales;
+        const units = info?.displayDimensionUnits;
+        if (!scales || !units) continue;
+        return Array.from(scales).map((v, i) =>
+          convertLength(v as number, (Array.from(units)[i] as string) ?? "m", "µm"),
+        );
+      }
     }
   }
   return null;
 }
 
+// ---------------------------------------------------------------------------
+
 export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
-  const canvas = (drawingTool as any).canvas as HTMLCanvasElement;
-  const container = (drawingTool as any).viewer.display.container as HTMLElement;
-  const viewer = (drawingTool as any).viewer;
+  const { canvas, ctx, viewer } = drawingTool;
+  const container = viewer.display.container as HTMLElement;
+
+  const getPixelSize = () => {
+    const ppp = calculatePhysicalSizePerPixel(viewer);
+    return ppp ? drawingTool.brushPhysicalSize.value / ppp : drawingTool.brushPixelSize.value;
+  };
+
+  // -- Canvas rendering (rAF) -----------------------------------------------
 
   const drawStep = () => {
     rafId = null;
@@ -134,59 +191,34 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
     if (!currentStroke && !currentPrompt) return;
     const { x, y } = pendingXY;
     pendingXY = null;
-    const ctx = (drawingTool as any).ctx as CanvasRenderingContext2D;
+
     const mode = drawingTool.activeMode.value;
     const promptMode = drawingTool.promptMode.value;
-    const startX = (drawingTool as any).startX as number;
-    const startY = (drawingTool as any).startY as number;
-    const snapshot = (drawingTool as any).snapshot as ImageData | null;
-
-    const physicalSizePerPixel = calculatePhysicalSizePerPixel(viewer);
-    const pixelSize = physicalSizePerPixel ? drawingTool.brushPhysicalSize.value / physicalSizePerPixel : drawingTool.brushPixelSize.value;
 
     if (mode === "brush") {
       ctx.globalCompositeOperation = "source-over";
       ctx.strokeStyle = drawingTool.strokeColor.value;
-      ctx.lineWidth = Math.max(1, pixelSize);
+      ctx.lineWidth = Math.max(1, getPixelSize());
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
       if (isFinite(lastScreen.x)) ctx.lineTo(x, y); else ctx.moveTo(x, y);
       ctx.stroke();
-    } else if (mode === "eraser") {
-      ctx.globalCompositeOperation = "destination-out";
-      ctx.strokeStyle = "rgba(0,0,0,1)";
-      ctx.lineWidth = Math.max(1, pixelSize);
+    } else if (promptMode === "bbox") {
+      if (drawingTool.snapshot) ctx.putImageData(drawingTool.snapshot, 0, 0);
+      ctx.globalCompositeOperation = "source-over";
+      ctx.strokeStyle = drawingTool.strokeColor.value;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(drawingTool.startX + 0.5, drawingTool.startY + 0.5, x - drawingTool.startX, y - drawingTool.startY);
+    } else if (promptMode === "scribble" || promptMode === "lasso") {
+      ctx.globalCompositeOperation = "source-over";
+      ctx.strokeStyle = drawingTool.strokeColor.value;
+      ctx.lineWidth = promptMode === "scribble" ? 4 : 2;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
       if (isFinite(lastScreen.x)) ctx.lineTo(x, y); else ctx.moveTo(x, y);
       ctx.stroke();
     }
-    
-    else if (promptMode === "bbox") {
-      if (snapshot) ctx.putImageData(snapshot, 0, 0);
-      ctx.globalCompositeOperation = "source-over";
-      ctx.strokeStyle = drawingTool.strokeColor.value;
-      ctx.lineWidth = 2;
-      const w = x - startX;
-      const h = y - startY;
-      ctx.strokeRect(startX + 0.5, startY + 0.5, w, h);
-    } else if (promptMode === "scribble") {
-      ctx.globalCompositeOperation = "source-over";
-      ctx.strokeStyle = drawingTool.strokeColor.value;
-      ctx.lineWidth = 4;
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
-      if (isFinite(lastScreen.x)) ctx.lineTo(x, y); else ctx.moveTo(x, y);
-      ctx.stroke();
-    } else if (promptMode === "lasso") {
-      ctx.globalCompositeOperation = "source-over";
-      ctx.strokeStyle = drawingTool.strokeColor.value;
-      ctx.lineWidth = 2;
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
-      if (isFinite(lastScreen.x)) ctx.lineTo(x, y); else ctx.moveTo(x, y);
-      ctx.stroke();
-    }
+
     lastScreen.x = x;
     lastScreen.y = y;
   };
@@ -201,42 +233,61 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
     if (rafId === null) rafId = window.requestAnimationFrame(drawStep);
   };
 
+  // -- Capture helpers ------------------------------------------------------
+
+  const finishCapture = () => {
+    isCapturing = false;
+    drawingTool.isDrawing = false;
+    ctx.globalCompositeOperation = "source-over";
+    drawingTool.snapshot = null;
+    if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+    drawingTool.applyMode();
+  };
+
+  // -- Mouse handlers -------------------------------------------------------
+
   const onMouseDown = (e: MouseEvent) => {
     const mode = drawingTool.activeMode.value;
     const promptMode = drawingTool.promptMode.value;
     const promptPolarity = drawingTool.promptPolarity.value;
     if ((!mode && !promptMode) || e.button !== 0) return;
+
+    // Only allow drawing/prompting on the rendered data panels (the image area)
+    if (!isOnDataPanel(e)) return;
+
+    // Reject clicks outside the actual data volume (e.g. empty/black area around image)
+    if (!isInDataBounds(viewer)) return;
+
+    const pt = voxelPoint(viewer);
+
     e.preventDefault();
     e.stopPropagation();
-    const pt = voxelPoint(viewer);
     const { x: cx, y: cy } = containerCoords(e, container);
     isCapturing = true;
     lastScreen.x = NaN;
     lastScreen.y = NaN;
-    (drawingTool as any).startX = cx;
-    (drawingTool as any).startY = cy;
-    (drawingTool as any).isDrawing = true;
+    drawingTool.startX = cx;
+    drawingTool.startY = cy;
+    drawingTool.isDrawing = true;
 
     const physicalSizePerVoxel = calculatePhysicalSizePerVoxel(viewer);
     sendScaleBarUpdate(viewer);
 
-    if (mode === "brush" || mode === "eraser") {
-      const baseStroke: BaseStroke = { mode, color: drawingTool.strokeColor.value, physicalSize: drawingTool.brushPhysicalSize.value, voxelSizes: physicalSizePerVoxel, timestamp: new Date().toISOString() };
-      currentStroke = { ...baseStroke, points: [] } as BrushStroke;
-      const ctx = (drawingTool as any).ctx as CanvasRenderingContext2D;
+    if (mode === "brush") {
+      currentStroke = {
+        mode: "brush",
+        color: drawingTool.strokeColor.value,
+        physicalSize: drawingTool.brushPhysicalSize.value,
+        voxelSizes: physicalSizePerVoxel,
+        timestamp: new Date().toISOString(),
+        points: [],
+      };
       ctx.beginPath();
       ctx.moveTo(cx, cy);
-      if (isFinite(pt.x) && isFinite(pt.y) && isFinite(pt.z)) {
-        (currentStroke as BrushStroke).points.push({ ...pt });
-      }
-    }
-    
-    else if (promptMode === "point") {
-      
-      if (isFinite(pt.x) && isFinite(pt.y) && isFinite(pt.z)) {
+      if (isValidPoint(pt)) currentStroke.points.push({ ...pt });
+    } else if (promptMode === "point") {
+      if (isValidPoint(pt)) {
         currentPrompt = { mode: "point", point: pt, polarity: promptPolarity };
-
-        const ctx = (drawingTool as any).ctx as CanvasRenderingContext2D;
         ctx.globalCompositeOperation = "source-over";
         ctx.fillStyle = drawingTool.strokeColor.value;
         ctx.beginPath();
@@ -246,86 +297,84 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
       return;
     } else if (promptMode === "bbox") {
       currentPrompt = { mode: "bbox", startPoint: pt, endPoint: pt, polarity: promptPolarity };
-      const ctx = (drawingTool as any).ctx as CanvasRenderingContext2D;
-      (drawingTool as any).snapshot = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      drawingTool.snapshot = ctx.getImageData(0, 0, canvas.width, canvas.height);
     } else if (promptMode === "scribble") {
       currentPrompt = { mode: "scribble", points: [], polarity: promptPolarity };
-      const ctx = (drawingTool as any).ctx as CanvasRenderingContext2D;
       ctx.beginPath();
       ctx.moveTo(cx, cy);
-      if (isFinite(pt.x) && isFinite(pt.y) && isFinite(pt.z)) {
-        (currentPrompt as PromptScribble).points.push({ ...pt });
-      }
+      if (isValidPoint(pt)) (currentPrompt as PromptScribble).points.push({ ...pt });
     } else if (promptMode === "lasso") {
       currentPrompt = { mode: "lasso", points: [], polarity: promptPolarity };
-      const ctx = (drawingTool as any).ctx as CanvasRenderingContext2D;
       ctx.beginPath();
       ctx.moveTo(cx, cy);
-      if (isFinite(pt.x) && isFinite(pt.y) && isFinite(pt.z)) {
-        (currentPrompt as PromptLasso).points.push({ ...pt });
-      }
+      if (isValidPoint(pt)) (currentPrompt as PromptLasso).points.push({ ...pt });
     }
+
+    const cleanup = () => {
+      window.removeEventListener("mousemove", onMove, true);
+      window.removeEventListener("mouseup", onUp, true);
+    };
+
+    const commitStroke = () => {
+      cleanup();
+      if (currentStroke) {
+        strokeData.push(currentStroke);
+        currentStroke = null;
+        finishCapture();
+        window.parent.postMessage({ type: "drawing_stroke_complete" }, "*");
+      }
+      if (currentPrompt) {
+        promptData.push(currentPrompt);
+        currentPrompt = null;
+        finishCapture();
+        window.parent.postMessage({ type: "prompt_complete", prompts: promptData }, "*");
+      }
+    };
+
     const onMove = (ev: MouseEvent) => {
       if (!isCapturing) return;
       if (!currentStroke && !currentPrompt) return;
+
+      // Skip recording/drawing when mouse is outside the data area,
+      // but keep listeners alive so neuroglancer's state isn't confused
+      if (!isOnDataPanel(ev) || !isInDataBounds(viewer)) {
+        if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+        pendingXY = null;
+        return;
+      }
       const p = voxelPoint(viewer);
-      if (isFinite(p.x) && isFinite(p.y) && isFinite(p.z)) {
-        if (currentStroke) {
-          if (currentStroke.mode === "brush" || currentStroke.mode === "eraser") {
-            const arr = (currentStroke as BrushStroke).points;
-            const last = arr[arr.length - 1];
-            if (!last || last.x !== p.x || last.y !== p.y || last.z !== p.z) arr.push(p);
-          }
-        } else if (currentPrompt) {
-          if (currentPrompt.mode === "bbox") {
-            (currentPrompt as PromptBBox).endPoint = p;
-          } else if (currentPrompt.mode === "scribble") {
-            const arr = (currentPrompt as PromptScribble).points;
-            const last = arr[arr.length - 1];
-            if (!last || last.x !== p.x || last.y !== p.y || last.z !== p.z) arr.push(p);
-          } else if (currentPrompt.mode === "lasso") {
-            const arr = (currentPrompt as PromptLasso).points;
-            const last = arr[arr.length - 1];
-            if (!last || last.x !== p.x || last.y !== p.y || last.z !== p.z) arr.push(p);
-          }
+
+      if (currentStroke) {
+        pushUniquePoint(currentStroke.points, p);
+      } else if (currentPrompt) {
+        if (currentPrompt.mode === "bbox") {
+          (currentPrompt as PromptBBox).endPoint = p;
+        } else if (currentPrompt.mode === "scribble") {
+          pushUniquePoint((currentPrompt as PromptScribble).points, p);
+        } else if (currentPrompt.mode === "lasso") {
+          pushUniquePoint((currentPrompt as PromptLasso).points, p);
         }
       }
       const { x, y } = containerCoords(ev, container);
       enqueueDraw(x, y);
     };
+
     const onUp = () => {
-      if (currentStroke) {
-        isCapturing = false;
-        strokeData.push(currentStroke);
-        currentStroke = null;
-        (drawingTool as any).isDrawing = false;
-        ((drawingTool as any).ctx as CanvasRenderingContext2D).globalCompositeOperation = "source-over";
-        (drawingTool as any).snapshot = null;
-        window.parent.postMessage({ type: "drawing_stroke_complete" }, "*");
-      }
-      if (currentPrompt) {
-        isCapturing = false;
-        promptData.push(currentPrompt);
-        currentPrompt = null;
-        (drawingTool as any).isDrawing = false;
-        ((drawingTool as any).ctx as CanvasRenderingContext2D).globalCompositeOperation = "source-over";
-        (drawingTool as any).snapshot = null;
-        window.parent.postMessage({ type: "prompt_complete", prompts: promptData }, "*");
-      }
-      window.removeEventListener("mousemove", onMove, true);
-      window.removeEventListener("mouseup", onUp, true);
-      if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
-      (drawingTool as any).applyMode?.();
+      commitStroke();
     };
+
     window.addEventListener("mousemove", onMove, true);
     window.addEventListener("mouseup", onUp, true);
-    (drawingTool as any).applyMode?.();
+    drawingTool.applyMode();
   };
 
   container.addEventListener("mousedown", onMouseDown, { capture: true });
 
+  // -- Incoming messages from parent ----------------------------------------
+
   window.addEventListener("message", (event) => {
     const { type, mode, size, color, polarity } = event.data ?? {};
+
     if (type === "screenshot") {
       viewer.screenshotManager.takeScreenshot();
       return;
@@ -333,22 +382,27 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
     if (type === "drawing_mode_change") {
       drawingTool.activeMode.value = mode;
       drawingTool.promptMode.value = null;
-      (drawingTool as any).applyMode?.();
+      drawingTool.applyMode();
       return;
     }
     if (type === "prompt_mode_change") {
       drawingTool.promptMode.value = mode;
       drawingTool.promptPolarity.value = polarity;
       drawingTool.activeMode.value = null;
-      (drawingTool as any).applyMode?.();
+      drawingTool.applyMode();
       return;
     }
     if (type === "drawing_size_change") {
-      const viewer = drawingTool.viewer;
-      const physicalSizePerPixel = calculatePhysicalSizePerPixel(viewer);
+      const ppp = calculatePhysicalSizePerPixel(viewer);
       drawingTool.brushPhysicalSize.value = size;
-      drawingTool.brushPixelSize.value = physicalSizePerPixel ? size / physicalSizePerPixel : size;
-      (drawingTool as any).applyMode?.();
+      if (ppp) {
+        const voxelSizes = calculatePhysicalSizePerVoxel(viewer);
+        const minPx = voxelSizes ? Math.max(1, Math.round(Math.min(...voxelSizes) / ppp)) : 1;
+        drawingTool.brushPixelSize.value = Math.max(minPx, size / ppp);
+      } else {
+        drawingTool.brushPixelSize.value = size;
+      }
+      drawingTool.applyMode();
       return;
     }
     if (type === "drawing_color_change") {
@@ -356,14 +410,12 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
       return;
     }
     if (type === "drawing_clear") {
-      const ctx = (drawingTool as any).ctx as CanvasRenderingContext2D;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       strokeData.length = 0;
       safeRedraw(viewer);
       return;
     }
     if (type === "prompt_clear") {
-      const ctx = (drawingTool as any).ctx as CanvasRenderingContext2D;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       promptData.length = 0;
       safeRedraw(viewer);
@@ -375,10 +427,13 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
         const reader = new FileReader();
         reader.onloadend = () => {
           window.parent.postMessage(
-            { type: "drawing_snapshot_created", imageData: reader.result, strokes: JSON.parse(JSON.stringify(strokeData)) },
-            "*"
+            {
+              type: "drawing_snapshot_created",
+              imageData: reader.result,
+              strokes: JSON.parse(JSON.stringify(strokeData)),
+            },
+            "*",
           );
-          const ctx = (drawingTool as any).ctx as CanvasRenderingContext2D;
           ctx.clearRect(0, 0, canvas.width, canvas.height);
           strokeData.length = 0;
           safeRedraw(viewer);
@@ -387,21 +442,42 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
       });
       return;
     }
-
+    if (type === "segment_hover") {
+      const segId = event.data.segmentId;
+      for (const managedLayer of viewer?.layerManager?.managedLayers ?? []) {
+        const layer = (managedLayer as any)?.layer;
+        if (layer?.type !== "segmentation") continue;
+        const selectionState = layer?.displayState?.segmentSelectionState;
+        if (selectionState) {
+          if (segId !== null && segId !== undefined) {
+            selectionState.set(BigInt(segId));
+          } else {
+            selectionState.set(null);
+          }
+        }
+      }
+      return;
+    }
+    if (type === "segment_recolor") {
+      for (const managedLayer of viewer?.layerManager?.managedLayers ?? []) {
+        const layer = (managedLayer as any)?.layer;
+        if (layer?.type !== "segmentation") continue;
+        const colorHash = layer?.displayState?.segmentationColorGroupState?.value?.segmentColorHash;
+        if (colorHash) {
+          colorHash.randomize();
+        }
+      }
+      return;
+    }
     if (type === "invalidate_chunks") {
       viewer.display.panels.forEach((panel: any) => {
-        if (panel?.sliceView) {
-          const visibleLayerList = Array.from(panel.sliceView.visibleLayerList);
-
-          visibleLayerList.forEach((managedLayer: any) => {
-            if (managedLayer?.userLayer?.type === "segmentation") {
-              const layerInfo = panel.sliceView.visibleLayers.get(managedLayer);
-              layerInfo?.allSources.flat().forEach((tsource: any) => tsource.source.invalidateCache());
-            }
-          });
+        if (!panel?.sliceView) return;
+        for (const managedLayer of panel.sliceView.visibleLayerList) {
+          if (managedLayer?.userLayer?.type !== "segmentation") continue;
+          const layerInfo = panel.sliceView.visibleLayers.get(managedLayer);
+          layerInfo?.allSources.flat().forEach((s: any) => s.source.invalidateCache());
         }
       });
-
       setTimeout(() => {
         viewer.display.panels.forEach((panel: any) => {
           panel?.sliceView?.viewChanged.dispatch();
@@ -411,12 +487,89 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
     }
   });
 
+  // -- Zoom tracking --------------------------------------------------------
+
+  let zoomRafId: number | null = null;
+  const recalcPixelSize = () => {
+    const ppp = calculatePhysicalSizePerPixel(viewer);
+    if (ppp) {
+      // Ensure cursor covers at least 1 voxel on screen
+      const voxelSizes = calculatePhysicalSizePerVoxel(viewer);
+      const minPx = voxelSizes ? Math.max(1, Math.round(Math.min(...voxelSizes) / ppp)) : 1;
+      const next = Math.max(minPx, Math.round(drawingTool.brushPhysicalSize.value / ppp));
+      if (next !== Math.round(drawingTool.brushPixelSize.value)) {
+        drawingTool.brushPixelSize.value = next;
+      }
+    }
+  };
+
   const navigationState = viewer?.navigationState;
   if (navigationState?.zoomFactor) {
     navigationState.zoomFactor.changed.add(() => {
       sendScaleBarUpdate(viewer);
+      if (zoomRafId === null) {
+        zoomRafId = window.requestAnimationFrame(() => {
+          zoomRafId = null;
+          recalcPixelSize();
+        });
+      }
     });
   }
-
   sendScaleBarUpdate(viewer);
+
+  // -- Segment color hash seed tracking -------------------------------------
+
+  const sendColorHashSeed = () => {
+    for (const managedLayer of viewer?.layerManager?.managedLayers ?? []) {
+      const layer = (managedLayer as any)?.layer;
+      if (layer?.type !== "segmentation") continue;
+      const colorHash = layer?.displayState?.segmentationColorGroupState?.value?.segmentColorHash;
+      if (colorHash) {
+        window.parent.postMessage({
+          type: "segment_color_seed",
+          seed: colorHash.value ?? 0,
+          layerName: managedLayer.name,
+        }, "*");
+        colorHash.changed.add(() => {
+          window.parent.postMessage({
+            type: "segment_color_seed",
+            seed: colorHash.value ?? 0,
+            layerName: managedLayer.name,
+          }, "*");
+        });
+      }
+    }
+  };
+
+  // -- Segment hover tracking (neuroglancer → parent) -----------------------
+
+  let lastHoveredSegId: string | null = null;
+  const sendSegmentHoverState = () => {
+    for (const managedLayer of viewer?.layerManager?.managedLayers ?? []) {
+      const layer = (managedLayer as any)?.layer;
+      if (layer?.type !== "segmentation") continue;
+      const selectionState = layer?.displayState?.segmentSelectionState;
+      if (selectionState?.changed) {
+        selectionState.changed.add(() => {
+          const raw = selectionState.value;
+          const segId = raw !== undefined ? raw.toString() : null;
+          if (segId !== lastHoveredSegId) {
+            lastHoveredSegId = segId;
+            window.parent.postMessage({
+              type: "segment_hover_sync",
+              segmentId: segId !== null ? Number(segId) : null,
+            }, "*");
+          }
+        });
+      }
+    }
+  };
+
+  // Send initial seed after a short delay to ensure layers are loaded
+  setTimeout(() => { sendColorHashSeed(); sendSegmentHoverState(); }, 500);
+
+  // Re-check when layers change
+  viewer?.layerManager?.layersChanged?.add?.(() => {
+    setTimeout(() => { sendColorHashSeed(); sendSegmentHoverState(); }, 100);
+  });
 }
