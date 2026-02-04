@@ -485,6 +485,19 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
       }, 100);
       return;
     }
+    if (type === "get_viewer_state") {
+      const state = (viewer.state as any).toJSON();
+      window.parent.postMessage({ type: "viewer_state", state }, "*");
+      return;
+    }
+    if (type === "plugin_activated") {
+      activatePluginBindings(event.data.pluginId, event.data.shortcuts ?? []);
+      return;
+    }
+    if (type === "plugin_deactivated") {
+      deactivatePluginBindings();
+      return;
+    }
   });
 
   // -- Zoom tracking --------------------------------------------------------
@@ -572,4 +585,55 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
   viewer?.layerManager?.layersChanged?.add?.(() => {
     setTimeout(() => { sendColorHashSeed(); sendSegmentHoverState(); }, 100);
   });
+
+  // -- Keyboard shortcut interception (capture phase) -----------------------
+  // Uses a capture-phase keydown listener to intercept keys BEFORE
+  // neuroglancer processes them, preventing conflicts with NG defaults.
+
+  const portalShortcuts: Record<string, string> = {
+    s: "portal-save-scene",
+    d: "portal-download-roi",
+    k: "portal-show-cheatsheet",
+  };
+
+  let activePluginId: string | null = null;
+  let activePluginKeys = new Set<string>();
+
+  document.addEventListener("keydown", (e: KeyboardEvent) => {
+    const ctrlOrCmd = e.ctrlKey || e.metaKey;
+    const key = e.key.toLowerCase();
+
+    // Portal shortcuts: Ctrl/Cmd + S/D/K
+    if (ctrlOrCmd && portalShortcuts[key]) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      window.parent.postMessage({
+        type: "portal_action",
+        action: portalShortcuts[key],
+      }, "*");
+      return;
+    }
+
+    // Plugin shortcuts: plain keys (no ctrl/cmd/alt)
+    if (activePluginId && !ctrlOrCmd && !e.altKey && activePluginKeys.has(key)) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      window.parent.postMessage({
+        type: "plugin_shortcut",
+        key,
+        pluginId: activePluginId,
+      }, "*");
+      return;
+    }
+  }, true); // capture phase
+
+  function activatePluginBindings(pluginId: string, shortcuts: string[]) {
+    activePluginId = pluginId;
+    activePluginKeys = new Set(shortcuts.map(k => k.toLowerCase()));
+  }
+
+  function deactivatePluginBindings() {
+    activePluginId = null;
+    activePluginKeys.clear();
+  }
 }
