@@ -3,7 +3,7 @@ import { RefCounted } from "#src/util/disposable.js";
 import { TrackableValue } from "#src/trackable_value.js";
 import type { Viewer } from "#src/viewer.js";
 
-type DrawingMode = "brush" | null;
+type DrawingMode = "brush" | "eraser" | null;
 type PromptMode = "point" | "bbox" | "scribble" | "lasso" | null;
 type Mode = DrawingMode | PromptMode;
 
@@ -16,6 +16,7 @@ export class DrawingTool extends RefCounted {
   brushPhysicalSize = new TrackableValue<number>(8, x => x);
   brushPixelSize = new TrackableValue<number>(20, x => x);
   strokeColor = new TrackableValue<string>("#ff0000", x => x);
+  isEraser = new TrackableValue<boolean>(false, x => x);
   canvas: HTMLCanvasElement;
   ctx: CanvasRenderingContext2D;
   isDrawing = false;
@@ -43,6 +44,7 @@ export class DrawingTool extends RefCounted {
     this.activeMode.changed.add(() => this.applyMode());
     this.promptMode.changed.add(() => this.applyMode());
     this.brushPixelSize.changed.add(() => this.applyMode());
+    this.isEraser.changed.add(() => this.applyMode());
     this.applyMode();
   }
 
@@ -67,9 +69,11 @@ export class DrawingTool extends RefCounted {
     const promptMode = this.promptMode.value;
 
     let cursor = "";
-    if (mode === "brush") {
+    if (mode === "brush" || mode === "eraser") {
       const r = Math.max(2, Math.floor(this.brushPixelSize.value / 2));
-      const url = this.makeBrushCursor(r);
+      // Use eraser cursor (square) when in eraser mode or when isEraser is true
+      const useEraser = mode === "eraser" || this.isEraser.value;
+      const url = useEraser ? this.makeEraserCursor(r) : this.makeBrushCursor(r);
       cursor = `url("${url}") ${r} ${r}, crosshair`;
     } else if (promptMode === "point") {
       const url = this.makePointCursor();
@@ -121,6 +125,13 @@ export class DrawingTool extends RefCounted {
   private makeBrushCursor(r: number) {
     const d = r * 2;
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${d}" height="${d}" viewBox="0 0 ${d} ${d}"><circle cx="${r}" cy="${r}" r="${r - 1}" fill="rgba(0,0,0,0.28)" stroke="white" stroke-width="1"/></svg>`;
+    return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+  }
+
+  private makeEraserCursor(r: number) {
+    const d = r * 2;
+    // Square cursor with red tint for eraser mode
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${d}" height="${d}" viewBox="0 0 ${d} ${d}"><rect x="1" y="1" width="${d - 2}" height="${d - 2}" fill="rgba(255,0,0,0.25)" stroke="white" stroke-width="1"/><line x1="1" y1="1" x2="${d - 1}" y2="${d - 1}" stroke="rgba(255,255,255,0.6)" stroke-width="1"/><line x1="${d - 1}" y1="1" x2="1" y2="${d - 1}" stroke="rgba(255,255,255,0.6)" stroke-width="1"/></svg>`;
     return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
   }
 
