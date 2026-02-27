@@ -231,6 +231,10 @@ function registerRelatedLayouts(
   panel: RenderedDataPanel,
   relatedLayouts: string[],
 ) {
+  // Hide layout controls when running inside an iframe
+  if (window !== window.parent) {
+    return;
+  }
   const controls = document.createElement("div");
   controls.className = "neuroglancer-data-panel-layout-controls";
   layout.registerDisposer(() => removeFromParent(controls));
