@@ -776,10 +776,12 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
       return;
     }
     if (type === "invalidate_chunks") {
+      // Invalidate all image and segmentation layers
       viewer.display.panels.forEach((panel: any) => {
         if (!panel?.sliceView) return;
         for (const managedLayer of panel.sliceView.visibleLayerList) {
-          if (managedLayer?.userLayer?.type !== "segmentation") continue;
+          const layerType = managedLayer?.userLayer?.type;
+          if (layerType !== "image" && layerType !== "segmentation") continue;
           const layerInfo = panel.sliceView.visibleLayers.get(managedLayer);
           layerInfo?.allSources?.flat().forEach((s: any) => s?.source?.invalidateCache?.());
         }
@@ -829,6 +831,34 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
       if (lockedZoomFactor !== null && navState?.zoomFactor) {
         navState.zoomFactor.value = lockedZoomFactor;
       }
+      safeRedraw(viewer);
+      return;
+    }
+    if (type === "set_viewer_position") {
+      // Set viewer position to center on a specific XYZ coordinate
+      const navState = viewer?.navigationState;
+      const coordSpace = viewer?.coordinateSpace?.value;
+      if (!navState?.position || !coordSpace) return;
+
+      const { x, y, z } = event.data.position ?? {};
+      if (x === undefined || y === undefined || z === undefined) return;
+
+      // Find dimension indices for x, y, z (coordinate space order may vary)
+      const names = coordSpace.names ?? [];
+      const idx_x = names.indexOf("x");
+      const idx_y = names.indexOf("y");
+      const idx_z = names.indexOf("z");
+
+      if (idx_x < 0 || idx_y < 0 || idx_z < 0) return;
+
+      // Create new position array in coordinate space order
+      const newPos = new Float32Array(navState.position.value.length);
+      newPos.set(navState.position.value); // Copy current values
+      newPos[idx_x] = x;
+      newPos[idx_y] = y;
+      newPos[idx_z] = z;
+
+      navState.position.value = newPos;
       safeRedraw(viewer);
       return;
     }
