@@ -1,6 +1,7 @@
 /**
  * @license
  * Copyright 2018 Google Inc.
+ * Copyright 2026 Bin Duan
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -12,6 +13,11 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * Modifications by Bin Duan:
+ * - Screen-pixel-based sizing (scales with zoom, independent of voxel dimensions)
+ * - Added border color and width support for point markers
+ * - Added independent alpha channel control for fill and border colors
  */
 
 /**
@@ -29,10 +35,10 @@ import {
   registerAnnotationTypeRenderHandler,
 } from "#src/annotation/type_handler.js";
 import {
-  defineCircleShader,
-  drawCircles,
-  initializeCircleShader,
-} from "#src/webgl/circles.js";
+  defineShapeShader,
+  drawShapes,
+  initializeShapeShader,
+} from "#src/webgl/shapes.js";
 import {
   defineLineShader,
   drawLines,
@@ -56,10 +62,12 @@ class RenderHelper extends AnnotationRenderHelper {
     );
     builder.addVarying("highp vec4", "vBorderColor");
     builder.addVertexCode(`
-float ng_markerDiameter;
+float ng_markerVoxelSize;  // Marker size (dimensionless, scales with zoom)
 float ng_markerBorderWidth;
-void setPointMarkerSize(float size) {
-  ng_markerDiameter = size;
+float ng_markerShape;
+
+void setPointMarkerSize(float voxelSize) {
+  ng_markerVoxelSize = voxelSize;
 }
 void setPointMarkerBorderWidth(float size) {
   ng_markerBorderWidth = size;
@@ -70,10 +78,14 @@ void setPointMarkerColor(vec4 color) {
 void setPointMarkerBorderColor(vec4 color) {
   vBorderColor = color;
 }
+void setPointMarkerShape(float shape) {
+  ng_markerShape = shape;
+}
 `);
     builder.addVertexMain(`
-ng_markerDiameter = 5.0;
-ng_markerBorderWidth = 1.0;
+ng_markerVoxelSize = 3.0;
+ng_markerBorderWidth = 0.0;
+ng_markerShape = 0.0;
 vBorderColor = vec4(0.0, 0.0, 0.0, 1.0);
 float modelPosition[${rank}] = getVertexPosition0();
 float clipCoefficient = getSubspaceClipCoefficient(modelPosition);
@@ -92,14 +104,23 @@ ${this.setPartIndex(builder)};
     "annotation/point:3d",
     (builder: ShaderBuilder) => {
       defineVertexId(builder);
-      defineCircleShader(builder, /*crossSectionFade=*/ this.targetIsSliceView);
+      defineShapeShader(builder, /*crossSectionFade=*/ this.targetIsSliceView);
       this.defineShaderCommon(builder);
       builder.addVertexMain(`
-emitCircle(uModelViewProjection *
-           vec4(projectModelVectorToSubspace(modelPosition), 1.0), ng_markerDiameter, ng_markerBorderWidth);
+// Project point to clip space
+vec3 worldPos = projectModelVectorToSubspace(modelPosition);
+vec4 clipPos = uModelViewProjection * vec4(worldPos, 1.0);
+
+// Fixed screen-pixel sizing: slider value = pixel size directly (no zoom scaling)
+float effectiveDiameter = ng_markerVoxelSize;
+
+// Clamp to reasonable range
+effectiveDiameter = clamp(effectiveDiameter, 0.5, 100.0);
+
+emitShape(clipPos, effectiveDiameter, ng_markerBorderWidth, ng_markerShape);
 `);
       builder.setFragmentMain(`
-vec4 color = getCircleColor(vColor, vBorderColor);
+vec4 color = getShapeColor(vColor, vBorderColor);
 emitAnnotation(color);
 `);
     },
@@ -142,7 +163,12 @@ for (int i = 0; i < 3; ++i) {
 if (minZ > maxZ) minZ = maxZ = 0.0;
 subspacePositionA[${extraDim}] = minZ;
 subspacePositionB[${extraDim}] = maxZ;
-emitLine(uModelViewProjection, subspacePositionA, subspacePositionB, ng_markerDiameter, ng_markerBorderWidth);
+
+// Fixed screen-pixel sizing for 2D view: slider value = pixel size directly
+float effectiveDiameter2d = ng_markerVoxelSize;
+effectiveDiameter2d = clamp(effectiveDiameter2d, 0.5, 100.0);
+
+emitLine(uModelViewProjection, subspacePositionA, subspacePositionB, effectiveDiameter2d, ng_markerBorderWidth);
 `);
         builder.setFragmentMain(`
 vec4 color = getRoundedLineColor(vColor, vBorderColor);
@@ -183,15 +209,18 @@ emitAnnotation(vec4(color.rgb, color.a * ${this.getCrossSectionFadeFactor()}));
 
   draw(context: AnnotationRenderContext) {
     const { numChunkDisplayDims } = context.chunkDisplayTransform;
+
     switch (numChunkDisplayDims) {
       case 3:
         this.enable(this.shaderGetter3d, context, (shader) => {
-          initializeCircleShader(
+          const { gl } = shader;
+          const { projectionParameters } = context.renderContext;
+          initializeShapeShader(
             shader,
-            context.renderContext.projectionParameters,
+            projectionParameters,
             { featherWidthInPixels: 1 },
           );
-          drawCircles(shader.gl, 1, context.count);
+          drawShapes(gl, 1, context.count);
         });
         break;
       case 2:
@@ -200,12 +229,14 @@ emitAnnotation(vec4(color.rgb, color.a * ${this.getCrossSectionFadeFactor()}));
           numChunkDisplayDims === 2 ? this.shaderGetter2d : this.shaderGetter1d,
           context,
           (shader) => {
+            const { gl } = shader;
+            const { projectionParameters } = context.renderContext;
             initializeLineShader(
               shader,
-              context.renderContext.projectionParameters,
+              projectionParameters,
               /*featherWidthInPixels=*/ 1,
             );
-            drawLines(shader.gl, 1, context.count);
+            drawLines(gl, 1, context.count);
           },
         );
         break;
@@ -218,10 +249,11 @@ registerAnnotationTypeRenderHandler<Point>(AnnotationType.POINT, {
   perspectiveViewRenderHelper: RenderHelper,
   defineShaderNoOpSetters(builder) {
     builder.addVertexCode(`
-void setPointMarkerSize(float size) {}
+void setPointMarkerSize(float voxelSize) {}
 void setPointMarkerBorderWidth(float size) {}
 void setPointMarkerColor(vec4 color) {}
 void setPointMarkerBorderColor(vec4 color) {}
+void setPointMarkerShape(float shape) {}
 `);
   },
   pickIdsPerInstance: 1,

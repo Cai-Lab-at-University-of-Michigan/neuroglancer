@@ -61,33 +61,126 @@ annotation type have no effect when rendering other annotation types.
 
 #### Point annotations
 
-Point annotations are rendered as circles.
+Point annotations are rendered as shapes (circle by default).
 
 ```glsl
- void setPointMarkerSize(float diameterInScreenPixels);
+void setPointMarkerShape(float shapeType);
 ```
 
-Sets the diameter of the circle in screen pixels (defaults to 5 pixels).
+Sets the marker shape. Supported shapes:
+- `0` = circle (default)
+- `1` = square
+- `2` = diamond
+- `3` = cross/plus
+- `4` = triangle (pointing up)
+
+Example usage:
+```glsl
+void main() {
+  setColor(defaultColor());
+  setPointMarkerShape(2.0);  // Diamond shape
+}
+```
+
+You can also set shape conditionally based on annotation properties:
+```glsl
+void main() {
+  setColor(defaultColor());
+  if (prop_cellType() == 1.0) {
+    setPointMarkerShape(2.0);  // Diamond for cell type 1
+  } else {
+    setPointMarkerShape(0.0);  // Circle for others
+  }
+}
+```
 
 ```glsl
-void setPointMarkerBorderWidth(float widthInScreenPixels);
+void setPointMarkerSize(float diameterInScreenPixels);
 ```
 
-Sets the border width in screen pixels (defaults to 1 pixel).
+Sets the diameter of the marker in screen pixels (defaults to 3 pixels). The marker maintains a **fixed size on screen** regardless of zoom level - it does not scale with zoom. This provides consistent marker visibility at all zoom levels.
+
+The size value directly corresponds to screen pixels. For example, `setPointMarkerSize(10.0)` will render a marker that is exactly 10 pixels in diameter on your screen.
+
+**Typical range:** 0.5 to 30 pixels (values are clamped to 0.5-100 internally).
+
+Example:
+```glsl
+void main() {
+  setColor(defaultColor());
+  setPointMarkerSize(3.0);  // 3-pixel diameter, fixed screen size
+}
+```
+
+```glsl
+void setPointMarkerBorderWidth(float width);
+```
+
+Sets the border width (defaults to 0, meaning no border). Range: 0 to 5.
+
+Example with border:
+```glsl
+void main() {
+  setColor(vec4(1.0, 0.0, 0.0, 1.0));  // Red fill
+  setPointMarkerBorderWidth(1.5);       // Border width
+  setPointMarkerBorderColor(vec4(0.0, 0.0, 0.0, 1.0));  // Black border
+}
+```
 
 ```glsl
 void setPointMarkerColor(vec4 rgba);
 void setPointMarkerColor(vec3 rgb);
 ```
 
-Sets the fill color (defaults to transparent). May also be set by calling the generic `setColor` function.
+Sets the fill color with optional alpha channel (defaults to red #ff0000 with alpha 1.0). May also be set by calling the generic `setColor` function. When using vec4, the alpha component controls fill opacity independently from border opacity.
+
+**Alpha range:** 0.0 (fully transparent) to 1.0 (fully opaque). Values outside this range will be clamped by the GPU.
 
 ```glsl
 void setPointMarkerBorderColor(vec4 rgba);
 void setPointMarkerBorderColor(vec3 rgb);
 ```
 
-Sets the border color (defaults to black with alpha 1).
+Sets the border color with optional alpha channel (defaults to black #000000 with alpha 1.0). The alpha component controls border opacity independently from fill opacity, allowing for effects like transparent fills with opaque borders or vice versa.
+
+**Alpha range:** 0.0 (fully transparent) to 1.0 (fully opaque). Values outside this range will be clamped by the GPU.
+
+Example with independent alpha control:
+```glsl
+void main() {
+  // Semi-transparent red fill (50% opacity)
+  setPointMarkerColor(vec4(1.0, 0.0, 0.0, 0.5));
+
+  // Solid black border (100% opacity)
+  setPointMarkerBorderColor(vec4(0.0, 0.0, 0.0, 1.0));
+  setPointMarkerBorderWidth(2.0);
+}
+```
+
+**Comprehensive example** combining all point marker features:
+```glsl
+void main() {
+  // Set marker shape based on annotation property
+  float cellType = prop_cellType();
+  if (cellType == 1.0) {
+    setPointMarkerShape(2.0);  // Diamond for excitatory neurons
+  } else if (cellType == 2.0) {
+    setPointMarkerShape(4.0);  // Triangle for inhibitory neurons
+  } else {
+    setPointMarkerShape(0.0);  // Circle for other cell types
+  }
+
+  // Fixed 8-pixel marker size (stays same size at all zoom levels)
+  setPointMarkerSize(8.0);
+
+  // Semi-transparent blue fill
+  setPointMarkerColor(vec4(0.2, 0.5, 1.0, 0.7));
+
+  // Opaque white border for contrast
+  setPointMarkerBorderColor(vec4(1.0, 1.0, 1.0, 1.0));
+  setPointMarkerBorderWidth(1.5);
+}
+```
 
 #### Line annotations
 
