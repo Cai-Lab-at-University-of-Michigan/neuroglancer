@@ -138,30 +138,34 @@ float sdCross(vec2 p) {
 }
 
 float sdTriangle(vec2 p) {
-  // Equilateral triangle pointing up, properly scaled to fit in [-1, 1] bounds
-  // Scale down to ensure no clipping
-  p *= 1.15;  // Scale up input to make triangle fit bounds
+  // Equilateral triangle pointing up, scaled to fit within [-1, 1] quad
+  // Vertices at (0, 1), (-0.866, -0.5), (0.866, -0.5)
+  // Returns: 0 at center, 1 at edge, >1 outside
+  // Based on Inigo Quilez's equilateral triangle SDF
 
-  // Equilateral triangle centered at origin, pointing up
-  // Vertices: (0, 0.866), (-0.866, -0.433), (0.866, -0.433)
   const float k = sqrt(3.0);
-  p.x = abs(p.x);  // Mirror to right side
 
-  // Distance to bottom edge (horizontal line at y = -0.577)
-  p.y += 0.577;
+  // Scale: raw IQ triangle has top at (0, 2/k ≈ 1.155), we want (0, 1)
+  vec2 q = p * (2.0 / k);
 
-  // Check if point is below the two slanted edges
-  if (p.x * k + p.y < 0.0) {
-    // Reflect point across the slanted edge
-    p = vec2(p.x - k * p.y, -k * p.x - p.y) / 2.0;
+  // Standard Inigo Quilez equilateral triangle SDF
+  q.x = abs(q.x) - 1.0;
+  q.y = q.y + 1.0 / k;
+
+  if (q.x + k * q.y > 0.0) {
+    q = vec2(q.x - k * q.y, -k * q.x - q.y) / 2.0;
   }
 
-  // Distance to bottom-left edge
-  p.x -= clamp(p.x, 0.0, 1.0);
+  q.x -= clamp(q.x, -2.0, 0.0);
 
-  // Calculate distance and normalize to [0, 1] range
-  float dist = length(p) * sign(p.y);
-  return abs(dist) / 1.15;  // Compensate for initial scaling
+  // Signed distance: negative inside, 0 at edge, positive outside
+  float d = -length(q) * sign(q.y);
+
+  // Inradius (distance from centroid to edge): 1/k ≈ 0.577
+  float r = 1.0 / k;
+
+  // Map: center (d=-r) → 0, edge (d=0) → 1, outside (d>0) → >1
+  return (d + r) / r;
 }
 
 float getShapeDistance(vec2 p, float shapeType) {
