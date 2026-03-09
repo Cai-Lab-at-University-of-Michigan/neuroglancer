@@ -1010,6 +1010,54 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
   }
   sendScaleBarUpdate(viewer);
 
+  // -- Position tracking (for VirtualStitching auto-select) -----------------
+
+  let positionRafId: number | null = null;
+  let lastSentPosition: { x: number; y: number; z: number } | null = null;
+
+  const sendPositionUpdate = () => {
+    const pos = navigationState?.position?.value;
+    const coordSpace = viewer?.coordinateSpace?.value;
+    if (!pos || !coordSpace) return;
+
+    // Get XYZ indices from coordinate space
+    const names = coordSpace.names ?? [];
+    const idx_x = names.indexOf("x");
+    const idx_y = names.indexOf("y");
+    const idx_z = names.indexOf("z");
+    if (idx_x < 0 || idx_y < 0 || idx_z < 0) return;
+
+    const x = pos[idx_x];
+    const y = pos[idx_y];
+    const z = pos[idx_z];
+
+    // Skip if position hasn't changed significantly (within 0.5 voxel)
+    if (lastSentPosition &&
+        Math.abs(x - lastSentPosition.x) < 0.5 &&
+        Math.abs(y - lastSentPosition.y) < 0.5 &&
+        Math.abs(z - lastSentPosition.z) < 0.5) {
+      return;
+    }
+
+    lastSentPosition = { x, y, z };
+    window.parent.postMessage({
+      type: "viewer_position_update",
+      position: { x, y, z },
+    }, "*");
+  };
+
+  if (navigationState?.position) {
+    navigationState.position.changed.add(() => {
+      // Debounce position updates with rAF
+      if (positionRafId === null) {
+        positionRafId = window.requestAnimationFrame(() => {
+          positionRafId = null;
+          sendPositionUpdate();
+        });
+      }
+    });
+  }
+
   // -- Segment color hash seed tracking -------------------------------------
 
   const sendColorHashSeed = () => {
