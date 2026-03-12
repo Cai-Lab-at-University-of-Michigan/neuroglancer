@@ -83,7 +83,7 @@ void setPointMarkerShape(float shape) {
 }
 `);
     builder.addVertexMain(`
-ng_markerVoxelSize = 3.0;
+ng_markerVoxelSize = 0.1;
 ng_markerBorderWidth = 0.0;
 ng_markerShape = 0.0;
 vBorderColor = vec4(0.0, 0.0, 0.0, 1.0);
@@ -111,10 +111,13 @@ ${this.setPartIndex(builder)};
 vec3 worldPos = projectModelVectorToSubspace(modelPosition);
 vec4 clipPos = uModelViewProjection * vec4(worldPos, 1.0);
 
-// Fixed screen-pixel sizing: slider value = pixel size directly (no zoom scaling)
-float effectiveDiameter = ng_markerVoxelSize;
+// Calculate zoom-based scale from MVP matrix diagonal
+// This gives consistent scaling across all views
+float projScale = abs(uModelViewProjection[0][0]);
+float zoomScale = projScale * 500.0;
+zoomScale = clamp(zoomScale, 0.5, 3.0);
 
-// Clamp to reasonable range
+float effectiveDiameter = ng_markerVoxelSize * zoomScale;
 effectiveDiameter = clamp(effectiveDiameter, 0.5, 100.0);
 
 emitShape(clipPos, effectiveDiameter, ng_markerBorderWidth, ng_markerShape);
@@ -164,8 +167,12 @@ if (minZ > maxZ) minZ = maxZ = 0.0;
 subspacePositionA[${extraDim}] = minZ;
 subspacePositionB[${extraDim}] = maxZ;
 
-// Fixed screen-pixel sizing for 2D view: slider value = pixel size directly
-float effectiveDiameter2d = ng_markerVoxelSize;
+// Calculate zoom-based scale from MVP matrix (same as 3D)
+float projScale2d = abs(uModelViewProjection[0][0]);
+float zoomScale2d = projScale2d * 500.0;
+zoomScale2d = clamp(zoomScale2d, 0.5, 3.0);
+
+float effectiveDiameter2d = ng_markerVoxelSize * zoomScale2d;
 effectiveDiameter2d = clamp(effectiveDiameter2d, 0.5, 100.0);
 
 emitLine(uModelViewProjection, subspacePositionA, subspacePositionB, effectiveDiameter2d, ng_markerBorderWidth);
@@ -209,12 +216,14 @@ emitAnnotation(vec4(color.rgb, color.a * ${this.getCrossSectionFadeFactor()}));
 
   draw(context: AnnotationRenderContext) {
     const { numChunkDisplayDims } = context.chunkDisplayTransform;
+    const { projectionParameters } = context.renderContext;
+
+    // Zoom-based scaling is now done directly in the shader using uModelViewProjection[0][0]
 
     switch (numChunkDisplayDims) {
       case 3:
         this.enable(this.shaderGetter3d, context, (shader) => {
           const { gl } = shader;
-          const { projectionParameters } = context.renderContext;
           initializeShapeShader(
             shader,
             projectionParameters,
@@ -230,7 +239,6 @@ emitAnnotation(vec4(color.rgb, color.a * ${this.getCrossSectionFadeFactor()}));
           context,
           (shader) => {
             const { gl } = shader;
-            const { projectionParameters } = context.renderContext;
             initializeLineShader(
               shader,
               projectionParameters,

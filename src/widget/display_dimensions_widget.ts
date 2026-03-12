@@ -599,8 +599,48 @@ export class DisplayDimensionsWidget extends RefCounted {
             displayDimensionUnits,
             displayDimensionScales,
             canonicalVoxelFactors,
+            voxelPhysicalScales,
           } = displayDimensionRenderInfoValue;
           const widgets: DepthWidget[] = [];
+
+          // Clamp depth range to minimum 1.25× voxel size to prevent annotation clipping
+          // Use hysteresis to prevent oscillation: clamp at 1.25×, restore at 2.25×
+          const DEFAULT_ZOOM_RELATIVE = -10; // Default zoom-relative value to restore to
+          const clampDepthRange = () => {
+            if (displayRank < 3) return; // Only for 3D views
+
+            const scale =
+              displayDimensionScales[2] / canonicalVoxelFactors[2];
+            const voxelPhysical = voxelPhysicalScales[2];
+            const minPhysical = 1.25 * voxelPhysical;
+            const restoreThreshold = 2.25 * voxelPhysical; // Hysteresis: restore at 2.25×
+
+            const zoomRelative = this.depthRange.value < 0;
+            const zoom = this.zoom.value;
+
+            // Calculate current physical depth
+            let currentPhysical: number;
+            if (zoomRelative) {
+              const rangeValue = -this.depthRange.value * zoom;
+              currentPhysical = rangeValue * scale;
+            } else {
+              currentPhysical = this.depthRange.value * scale;
+            }
+
+            // Calculate what physical depth WOULD be with default zoom-relative value
+            // This is used to decide when to restore from absolute mode
+            const hypotheticalPhysical =
+              Math.abs(DEFAULT_ZOOM_RELATIVE) * zoom * scale;
+
+            if (zoomRelative && currentPhysical < minPhysical) {
+              // Zooming in too far - switch to absolute mode with minimum depth
+              const newValue = minPhysical / scale;
+              this.depthRange.value = newValue;
+            } else if (!zoomRelative && hypotheticalPhysical > restoreThreshold) {
+              // Zooming out - if default zoom-relative would give enough depth, restore it
+              this.depthRange.value = DEFAULT_ZOOM_RELATIVE;
+            }
+          };
 
           const updateView = () => {
             relativeCheckbox.checked = this.depthRange.value < 0;
@@ -707,6 +747,8 @@ export class DisplayDimensionsWidget extends RefCounted {
             this.depthRange.changed.add(debouncedUpdateView),
           );
           context.registerDisposer(this.zoom.changed.add(debouncedUpdateView));
+          // Clamp depth range when zoom changes to prevent annotation clipping
+          context.registerDisposer(this.zoom.changed.add(clampDepthRange));
           updateView();
         },
         displayDimensionRenderInfo,
