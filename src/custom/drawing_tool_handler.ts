@@ -776,7 +776,52 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
       return;
     }
     if (type === "invalidate_chunks") {
-      // Invalidate all image and segmentation layers
+      const layerId = event.data.layerId;
+      const reloadLayer = event.data.reloadLayer === true;
+
+      // If reloadLayer is requested with a layerId, reload the layer to refetch /info
+      // This is needed for virtual stitching where tile offsets change
+      if (reloadLayer && layerId) {
+        const layerManager = viewer?.layerManager;
+        const layerSpec = (viewer as any)?.layerSpecification;
+
+        if (layerManager && layerSpec) {
+          // Find layer by matching the source URL with the layerId
+          let targetLayer: any = null;
+          for (const managedLayer of layerManager.managedLayers) {
+            const layerJson = managedLayer.toJSON();
+            const source = layerJson?.source;
+            // Check if source URL contains the layerId
+            const sourceStr = typeof source === "string" ? source : JSON.stringify(source);
+            if (sourceStr?.includes(layerId)) {
+              targetLayer = managedLayer;
+              break;
+            }
+          }
+
+          if (targetLayer) {
+            const layerName = targetLayer.name;
+            const layerJson = targetLayer.toJSON();
+            const layerIndex = layerManager.managedLayers.indexOf(targetLayer);
+
+            // Remove the old layer
+            layerManager.removeManagedLayer(targetLayer);
+
+            // Recreate layer to force /info refetch
+            import("#src/layer/index.js").then(({ makeLayer }) => {
+              const newLayer = makeLayer(layerSpec, layerName, layerJson);
+              layerManager.addManagedLayer(newLayer, layerIndex >= 0 ? layerIndex : undefined);
+              console.log(`[invalidate_chunks] Reloaded layer: ${layerName}`);
+              viewer.display.scheduleRedraw();
+            }).catch((err) => {
+              console.error("[invalidate_chunks] Failed to reload layer:", err);
+            });
+            return;
+          }
+        }
+      }
+
+      // Standard chunk cache invalidation
       viewer.display.panels.forEach((panel: any) => {
         if (!panel?.sliceView) return;
         for (const managedLayer of panel.sliceView.visibleLayerList) {
