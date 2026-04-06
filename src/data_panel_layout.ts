@@ -84,7 +84,7 @@ export class InputEventBindings {
 
 export interface ViewerUIState
   extends SliceViewViewerState,
-    VisibilityPrioritySpecification {
+  VisibilityPrioritySpecification {
   display: DisplayContext;
   mouseState: MouseSelectionState;
   perspectiveNavigationState: NavigationState;
@@ -232,9 +232,9 @@ function registerRelatedLayouts(
   relatedLayouts: string[],
 ) {
   // Hide layout controls when running inside an iframe
-  if (window !== window.parent) {
-    return;
-  }
+  // if (window !== window.parent) {
+  //   return;
+  // }
   const controls = document.createElement("div");
   controls.className = "neuroglancer-data-panel-layout-controls";
   layout.registerDisposer(() => removeFromParent(controls));
@@ -844,8 +844,7 @@ export class CrossSectionSpecificationMap extends WatchableMap<
 
 export class DataPanelLayoutSpecification
   extends RefCounted
-  implements Trackable
-{
+  implements Trackable {
   changed = new NullarySignal();
   type: TrackableValue<string>;
   crossSections: CrossSectionSpecificationMap;
