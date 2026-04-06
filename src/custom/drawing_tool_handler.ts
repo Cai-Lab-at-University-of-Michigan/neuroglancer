@@ -1,4 +1,5 @@
 import type { DrawingTool } from "#src/custom/drawing_tool.js";
+import { initMinimap, getMinimap } from "#src/custom/minimap.js";
 import { ALLOWED_UNITS } from "#src/widget/scale_bar.js";
 
 interface StrokePoint {
@@ -1023,7 +1024,46 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
       }, "*");
       return;
     }
+    // -- Minimap handlers -----------------------------------------------------
+    if (type === "minimap_toggle") {
+      const minimap = getMinimap();
+      if (minimap) {
+        minimap.setEnabled(event.data.enabled ?? true);
+      }
+      return;
+    }
+    if (type === "minimap_thumbnail") {
+      const minimap = getMinimap();
+      if (minimap && event.data.url) {
+        minimap.setThumbnail(event.data.url);
+      }
+      return;
+    }
+    if (type === "minimap_toggle_orientation") {
+      const minimap = getMinimap();
+      if (minimap) {
+        const { orientation, enabled } = event.data;
+        if (orientation && typeof enabled === "boolean") {
+          minimap.setOrientationEnabled(orientation, enabled);
+        }
+      }
+      return;
+    }
+    if (type === "minimap_get_state") {
+      const minimap = getMinimap();
+      if (minimap) {
+        const state = minimap.getOrientationState();
+        window.parent.postMessage(
+          { type: "minimap_state", state },
+          "*"
+        );
+      }
+      return;
+    }
   });
+
+  // -- Initialize minimap ---------------------------------------------------
+  initMinimap(viewer);
 
   // -- Zoom tracking --------------------------------------------------------
 
