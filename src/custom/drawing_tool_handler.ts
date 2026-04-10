@@ -822,16 +822,36 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
         }
       }
 
-      // Standard chunk cache invalidation
+      // Standard chunk cache invalidation (2D slice views + 3D)
+      const invalidateTypes = new Set(["segmentation", "annotation"]);
       viewer.display.panels.forEach((panel: any) => {
-        if (!panel?.sliceView) return;
-        for (const managedLayer of panel.sliceView.visibleLayerList) {
-          const layerType = managedLayer?.userLayer?.type;
-          if (layerType !== "image" && layerType !== "segmentation") continue;
-          const layerInfo = panel.sliceView.visibleLayers.get(managedLayer);
-          layerInfo?.allSources?.flat().forEach((s: any) => s?.source?.invalidateCache?.());
+        // 2D slice view panels
+        if (panel?.sliceView) {
+          for (const managedLayer of panel.sliceView.visibleLayerList) {
+            const layerType = managedLayer?.userLayer?.type;
+            if (!invalidateTypes.has(layerType)) continue;
+            const layerInfo = panel.sliceView.visibleLayers.get(managedLayer);
+            layerInfo?.allSources?.flat().forEach((s: any) => s?.source?.invalidateCache?.());
+          }
+        }
+        // 3D perspective panel
+        if (panel?.perspectivePanel || panel?.viewer) {
+          const targetPanel = panel.perspectivePanel || panel;
+          targetPanel?.visibleLayerTracker?.visibleLayers?.forEach?.((renderLayer: any) => {
+            renderLayer?.source?.invalidateCache?.();
+          });
         }
       });
+
+      // Also invalidate via layerManager for all render layers (catches 3D mesh/volume)
+      viewer.layerManager?.managedLayers?.forEach?.((managedLayer: any) => {
+        const layerType = managedLayer?.layer?.type;
+        if (!invalidateTypes.has(layerType)) return;
+        managedLayer?.layer?.renderLayers?.forEach?.((renderLayer: any) => {
+          renderLayer?.source?.invalidateCache?.();
+        });
+      });
+
       setTimeout(() => {
         viewer.display.panels.forEach((panel: any) => {
           panel?.sliceView?.viewChanged?.dispatch?.();
