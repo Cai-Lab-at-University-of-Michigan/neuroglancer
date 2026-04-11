@@ -1195,16 +1195,17 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
           const posY = pos[idx_y];
           const posZ = pos[idx_z];
 
-          // Z range: a few slices around current position
-          const zSlices = 10;
+          // Z range: use the full Z extent of the image so that
+          // algorithms (e.g. flood fill) can propagate across all slices.
+          // Paint strokes still work per-slice via the user's scroll position.
+          const z_start = 0;
+          const z_end = Math.floor(upperZ);
 
           // Calculate bbox in mip 0 coords and clamp to image bounds
           const x_start = Math.max(0, Math.floor(posX - halfW));
           const x_end = Math.min(Math.floor(upperX), Math.ceil(posX + halfW));
           const y_start = Math.max(0, Math.floor(posY - halfH));
           const y_end = Math.min(Math.floor(upperY), Math.ceil(posY + halfH));
-          const z_start = Math.max(0, Math.floor(posZ - zSlices / 2));
-          const z_end = Math.min(Math.floor(upperZ), Math.ceil(posZ + zSlices / 2));
 
           // Ensure bbox has positive dimensions
           if (x_end > x_start && y_end > y_start && z_end > z_start) {
