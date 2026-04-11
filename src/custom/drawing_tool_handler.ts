@@ -1,6 +1,10 @@
 import type { DrawingTool } from "#src/custom/drawing_tool.js";
 import { initMinimap, getMinimap } from "#src/custom/minimap.js";
 import { ALLOWED_UNITS } from "#src/widget/scale_bar.js";
+// [BUG-016] Import annotation types for rendering seed prompts as 3D annotations
+// instead of canvas overlay dots (so they track with zoom/pan/Z scroll)
+import { AnnotationType, makeAnnotationId } from "#src/annotation/index.js";
+import { makeLayer } from "#src/layer/index.js";
 
 interface StrokePoint {
   x: number;
@@ -259,6 +263,68 @@ function safeRedraw(viewer: any) {
   viewer?.display?.scheduleRedraw?.();
 }
 
+// [BUG-016] Helper to get or create dedicated annotation layers for prompt seeds.
+// Two layers: green for positive seeds, red for negative seeds.
+// Prompts rendered as NG annotations automatically track with zoom/pan/Z scroll.
+const _promptSources: { pos: any; neg: any } = { pos: null, neg: null };
+const _promptLayerCreated: { pos: boolean; neg: boolean } = { pos: false, neg: false };
+
+function getPromptAnnotationSource(viewer: any, polarity: "positive" | "negative"): any {
+  const key = polarity === "positive" ? "pos" : "neg";
+  const layerName = polarity === "positive" ? "__seeds_pos" : "__seeds_neg";
+  const color = polarity === "positive" ? "#00ff00" : "#ff0000";
+
+  if (_promptSources[key]) return _promptSources[key];
+  if (!viewer?.layerManager?.managedLayers) return null;
+
+  // Look for existing layer (may have been created but source not yet ready)
+  for (const managedLayer of viewer.layerManager.managedLayers) {
+    if (managedLayer.name === layerName) {
+      const source = managedLayer.layer?.localAnnotations;
+      if (source) {
+        _promptSources[key] = source;
+        return source;
+      }
+      return null;
+    }
+  }
+
+  // Create new annotation layer only once per polarity
+  if (_promptLayerCreated[key]) return null;
+  _promptLayerCreated[key] = true;
+
+  try {
+    const layerSpec = viewer.layerSpecification;
+    if (!layerSpec) return null;
+
+    const spec = { type: "annotation", annotationColor: color };
+    const managedLayer = makeLayer(layerSpec, layerName, spec);
+    layerSpec.add(managedLayer);
+    console.log(`[BUG-016] Created ${layerName} annotation layer (${color})`);
+  } catch (e) {
+    console.warn(`[BUG-016] Failed to create ${layerName}:`, e);
+    _promptLayerCreated[key] = false;
+  }
+  return null;
+}
+
+// [BUG-016] Build a Float32Array point in NG coordinate space order
+function makeAnnotationPoint(viewer: any, pt: StrokePoint): Float32Array {
+  const coordSpace = viewer?.coordinateSpace?.value;
+  const names = coordSpace?.names;
+  const ndim = names?.length ?? 3;
+  const arr = new Float32Array(ndim);
+  if (names) {
+    const ix = names.indexOf("x"), iy = names.indexOf("y"), iz = names.indexOf("z");
+    if (ix >= 0) arr[ix] = pt.x;
+    if (iy >= 0) arr[iy] = pt.y;
+    if (iz >= 0) arr[iz] = pt.z;
+  } else {
+    arr[0] = pt.x; arr[1] = pt.y; arr[2] = pt.z;
+  }
+  return arr;
+}
+
 function convertLength(value: number, fromUnit: string, toUnit: string): number {
   const from = ALLOWED_UNITS.find(u => u.unit === fromUnit);
   const to = ALLOWED_UNITS.find(u => u.unit === toUnit);
@@ -454,12 +520,74 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
       }
     } else if (promptMode === "point") {
       if (isValidPoint(pt)) {
-        currentPrompt = { mode: "point", point: pt, polarity: promptPolarity };
-        ctx.globalCompositeOperation = "source-over";
-        ctx.fillStyle = drawingTool.strokeColor.value;
-        ctx.beginPath();
-        ctx.arc(cx, cy, 5, 0, Math.PI * 2);
-        ctx.fill();
+        const prompt: PromptPoint = { mode: "point", point: pt, polarity: promptPolarity };
+
+        // [BUG-016] Render seed as NG annotation (tracks with zoom/pan/Z scroll)
+        // instead of canvas overlay dot (fixed screen position).
+        // On first click, source may not be ready (async init). Try once,
+        // then retry after 100ms to catch the async initialization.
+        let source = getPromptAnnotationSource(viewer, promptPolarity);
+        if (!source) {
+          // Trigger layer creation and schedule a retry to add the annotation
+          setTimeout(() => {
+            const retrySource = getPromptAnnotationSource(viewer, promptPolarity);
+            if (retrySource) {
+              try {
+                retrySource.add({
+                  type: AnnotationType.POINT,
+                  id: makeAnnotationId(),
+                  point: makeAnnotationPoint(viewer, pt),
+                  description: `${promptPolarity} seed`,
+                  properties: [],
+                  relatedSegments: [],
+                });
+                // Clear the canvas fallback dot since annotation is now added
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                if (lockedBBox) drawLockedRegionIndicator(ctx, canvas, viewer, lockedBBox);
+              } catch (e) {
+                // Fallback dot already drawn, ignore
+              }
+            }
+          }, 200);
+        }
+        if (source) {
+          try {
+            source.add({
+              type: AnnotationType.POINT,
+              id: makeAnnotationId(),
+              point: makeAnnotationPoint(viewer, pt),
+              description: `${promptPolarity} seed`,
+              properties: [],
+              relatedSegments: [],
+            });
+          } catch (e) {
+            console.warn("[BUG-016] Failed to add annotation, falling back to canvas:", e);
+            // Fallback: draw on canvas if annotation fails
+            ctx.globalCompositeOperation = "source-over";
+            ctx.fillStyle = drawingTool.strokeColor.value;
+            ctx.beginPath();
+            ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        } else {
+          // Fallback: no annotation layer available, use canvas
+          ctx.globalCompositeOperation = "source-over";
+          ctx.fillStyle = drawingTool.strokeColor.value;
+          ctx.beginPath();
+          ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        // [BUG-016] Original canvas-only rendering (commented out):
+        // ctx.globalCompositeOperation = "source-over";
+        // ctx.fillStyle = drawingTool.strokeColor.value;
+        // ctx.beginPath();
+        // ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+        // ctx.fill();
+
+        promptData.push(prompt);
+        finishCapture();
+        window.parent.postMessage({ type: "prompt_complete", prompts: promptData }, "*");
       }
       return;
     } else if (promptMode === "bbox") {
@@ -715,11 +843,73 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
       return;
     }
     if (type === "prompt_clear") {
+      // [BUG-016] Clear both NG annotation layers (positive + negative seed dots)
+      for (const pol of ["positive", "negative"] as const) {
+        const source = getPromptAnnotationSource(viewer, pol);
+        if (source) {
+          try { source.clear(); } catch (e) {
+            console.warn("[BUG-016] Failed to clear annotations:", e);
+          }
+        }
+      }
+      // [BUG-016] Original canvas-only clearing (commented out):
+      // ctx.clearRect(0, 0, canvas.width, canvas.height);
+      // Canvas still needs clearing for any non-annotation overlays (locked bbox indicator)
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       promptData.length = 0;
+      // Reset cached annotation sources in case layers were removed
+      _promptSources.pos = null;
+      _promptSources.neg = null;
+      _promptLayerCreated.pos = false;
+      _promptLayerCreated.neg = false;
       // Redraw locked indicator if view is locked
       if (lockedBBox) {
         drawLockedRegionIndicator(ctx, canvas, viewer, lockedBBox);
+      }
+      safeRedraw(viewer);
+      return;
+    }
+    if (type === "prompt_restore") {
+      // [BUG-016] Restore seed dots from saved per-neuron data.
+      // Clear existing dots first
+      for (const pol of ["positive", "negative"] as const) {
+        const source = getPromptAnnotationSource(viewer, pol);
+        if (source) {
+          try { source.clear(); } catch {}
+        }
+      }
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      promptData.length = 0;
+      _promptSources.pos = null;
+      _promptSources.neg = null;
+      _promptLayerCreated.pos = false;
+      _promptLayerCreated.neg = false;
+      if (lockedBBox) {
+        drawLockedRegionIndicator(ctx, canvas, viewer, lockedBBox);
+      }
+
+      // Re-add saved prompts as annotations
+      const restoredPrompts = event.data?.prompts || [];
+      for (const p of restoredPrompts) {
+        if (p.type !== "point" || !p.data) continue;
+        const pol = p.polarity || "positive";
+        const pt = { x: p.data.x ?? 0, y: p.data.y ?? 0, z: p.data.z ?? 0 };
+        const prompt: PromptPoint = { mode: "point", point: pt, polarity: pol };
+        promptData.push(prompt);
+
+        const source = getPromptAnnotationSource(viewer, pol);
+        if (source) {
+          try {
+            source.add({
+              type: AnnotationType.POINT,
+              id: makeAnnotationId(),
+              point: makeAnnotationPoint(viewer, pt),
+              description: `${pol} seed`,
+              properties: [],
+              relatedSegments: [],
+            });
+          } catch {}
+        }
       }
       safeRedraw(viewer);
       return;
