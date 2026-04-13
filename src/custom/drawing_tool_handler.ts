@@ -1013,7 +1013,7 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
       }
 
       // Standard chunk cache invalidation (2D slice views + 3D)
-      const invalidateTypes = new Set(["segmentation", "annotation"]);
+      const invalidateTypes = new Set(event.data.layerTypes || []);
       viewer.display.panels.forEach((panel: any) => {
         // 2D slice view panels
         if (panel?.sliceView) {
