@@ -302,6 +302,24 @@ export class LayerBar extends RefCounted {
 
     const { element, manager, selectedLayer } = this;
     element.className = "neuroglancer-layer-panel";
+
+    // Top-down collapse toggle: COLLAPSED by default so the viewport has the
+    // full height on scene load. When collapsed the whole bar retracts and a
+    // small floating chevron remains clickable.
+    element.dataset.collapsed = "true";
+    const collapseBtn = document.createElement("div");
+    collapseBtn.className = "neuroglancer-layer-panel-collapsable";
+    collapseBtn.textContent = "▸"; // collapsed → click to expand
+    collapseBtn.title = "Expand layer bar";
+    this.registerEventListener(collapseBtn, "click", () => {
+      const collapsed = element.dataset.collapsed === "true";
+      element.dataset.collapsed = (!collapsed).toString();
+      collapseBtn.textContent = collapsed ? "▾" : "▸";
+      collapseBtn.title = collapsed
+        ? "Collapse layer bar"
+        : "Expand layer bar";
+    });
+    element.appendChild(collapseBtn);
     this.registerDisposer(
       manager.layerSelectedValues.changed.add(() => {
         this.handleLayerValuesChanged();

@@ -29,6 +29,65 @@
   z-index: -0.1;
 }
 
+/* Top-down collapse toggle — placed as the first child of
+   .neuroglancer-layer-panel. Default (no data-collapsed) = expanded.
+   When data-collapsed="true", every other child is hidden so the bar
+   retracts upward, leaving only the chevron visible. */
+.neuroglancer-layer-panel-collapsable {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  margin: 1px 0 1px 5px;
+  cursor: pointer;
+  color: #aaa;
+  font-family: sans-serif;
+  font-size: 11pt;
+  line-height: 1;
+  user-select: none;
+}
+
+.neuroglancer-layer-panel-collapsable:hover {
+  color: #fff;
+}
+
+.neuroglancer-layer-panel[data-collapsed="true"]>*:not(.neuroglancer-layer-panel-collapsable) {
+  display: none !important;
+}
+
+/* When collapsed, the panel itself takes zero vertical space; the chevron
+   floats so the user can still click to expand. */
+.neuroglancer-layer-panel {
+  position: relative;
+}
+
+.neuroglancer-layer-panel[data-collapsed="true"] {
+  height: 0;
+  min-height: 0;
+  margin: 0;
+  overflow: visible;
+}
+
+.neuroglancer-layer-panel[data-collapsed="true"]>.neuroglancer-layer-panel-collapsable {
+  position: absolute;
+  top: 0;
+  left: 0;
+  margin: 0;
+  padding: 2px 6px;
+  background: rgba(0, 0, 0, 0.5);
+  border-bottom-right-radius: 4px;
+  z-index: 10;
+}
+
+/* Shift the display-dimensions widget's grid right so the floating chevron
+   at top-left doesn't cover it. Only the grid (coordinate values) is padded,
+   not the outer wrapper, so adjacent layout isn't disturbed. */
+.neuroglancer-display-dimensions-widget-dimension-grid {
+  padding-top: 14px;
+}
+
 .neuroglancer-layer-item {
   position: relative;
   display: flex;
@@ -77,8 +136,7 @@
   padding-right: 1px;
 }
 
-.neuroglancer-layer-panel[data-show-hover-values="true"]
-  .neuroglancer-layer-item-value {
+.neuroglancer-layer-panel[data-show-hover-values="true"] .neuroglancer-layer-item-value {
   display: inline-block;
   font-family: monospace;
   font-size: medium;
@@ -90,8 +148,7 @@
   text-align: center;
 }
 
-.neuroglancer-layer-panel[data-show-hover-values="false"]
-  .neuroglancer-layer-item-value {
+.neuroglancer-layer-panel[data-show-hover-values="false"] .neuroglancer-layer-item-value {
   display: none;
 }
 
