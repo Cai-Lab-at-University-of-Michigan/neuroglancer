@@ -42,6 +42,11 @@ import { makeDeleteButton } from "#src/widget/delete_button.js";
 import { makeIcon } from "#src/widget/icon.js";
 import { PositionWidget } from "#src/widget/position_widget.js";
 
+// Persists across LayerBar (re-)constructions so layer-visibility toggles or
+// layout changes that re-instantiate the bar don't snap it back to collapsed.
+// Defaults to collapsed on first session load.
+let layerBarCollapsed = true;
+
 class LayerWidget extends RefCounted {
   element = document.createElement("div");
   layerNumberElement = document.createElement("div");
@@ -303,21 +308,28 @@ export class LayerBar extends RefCounted {
     const { element, manager, selectedLayer } = this;
     element.className = "neuroglancer-layer-panel";
 
-    // Top-down collapse toggle: COLLAPSED by default so the viewport has the
-    // full height on scene load. When collapsed the whole bar retracts and a
-    // small floating chevron remains clickable.
-    element.dataset.collapsed = "true";
+    // Top-down collapse toggle: COLLAPSED by default on first session load.
+    // The state is persisted at module scope (see layerBarCollapsed below) so
+    // that any code path that disposes & reconstructs the LayerBar — e.g.
+    // layout changes triggered by visibility toggles — doesn't snap the panel
+    // back to "collapsed" and surprise the user.
+    element.dataset.collapsed = layerBarCollapsed ? "true" : "false";
     const collapseBtn = document.createElement("div");
     collapseBtn.className = "neuroglancer-layer-panel-collapsable";
-    collapseBtn.textContent = "▸"; // collapsed → click to expand
-    collapseBtn.title = "Expand layer bar";
-    this.registerEventListener(collapseBtn, "click", () => {
-      const collapsed = element.dataset.collapsed === "true";
-      element.dataset.collapsed = (!collapsed).toString();
-      collapseBtn.textContent = collapsed ? "▾" : "▸";
-      collapseBtn.title = collapsed
-        ? "Collapse layer bar"
-        : "Expand layer bar";
+    collapseBtn.textContent = layerBarCollapsed ? "▸" : "▾";
+    collapseBtn.title = layerBarCollapsed
+      ? "Expand layer bar"
+      : "Collapse layer bar";
+    this.registerEventListener(collapseBtn, "click", (event: MouseEvent) => {
+      // Defensive: keep this click off any sibling/ancestor handlers that
+      // might exist now or be added later.
+      event.stopPropagation();
+      layerBarCollapsed = !layerBarCollapsed;
+      element.dataset.collapsed = layerBarCollapsed ? "true" : "false";
+      collapseBtn.textContent = layerBarCollapsed ? "▸" : "▾";
+      collapseBtn.title = layerBarCollapsed
+        ? "Expand layer bar"
+        : "Collapse layer bar";
     });
     element.appendChild(collapseBtn);
     this.registerDisposer(
