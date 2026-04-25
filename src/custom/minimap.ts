@@ -10,32 +10,41 @@ const VIEWPORT_BORDER_WIDTH = 2;
 type Orientation = "xy" | "xz" | "yz";
 
 /**
- * Get orientation from viewport normal vector.
- * The viewport normal tells us which direction is "into the screen":
- * - XY plane: normal is (0, 0, ±1) - looking along Z axis
- * - XZ plane: normal is (0, ±1, 0) - looking along Y axis
- * - YZ plane: normal is (±1, 0, 0) - looking along X axis
+ * Get orientation from viewport normal vector by snapping to the closest
+ * principal plane. Picks the axis with the largest |normal| component, with
+ * ties broken Z > Y > X (matches neuroglancer's default load orientation).
+ * Returns null only if the normal is degenerate (all zeros / wrong length).
+ *
+ * - XY plane: normal closest to ±Z (looking down Z)
+ * - XZ plane: normal closest to ±Y
+ * - YZ plane: normal closest to ±X
+ *
+ * For oblique views the chosen plane is the closest principal plane; the
+ * rotated viewport bbox is then an approximation projected onto that plane.
  */
-function getOrientationFromNormal(normal: Float32Array | number[]): Orientation | null {
+function getOrientationFromNormal(
+  normal: Float32Array | number[],
+): Orientation | null {
   if (!normal || normal.length < 3) return null;
 
-  const absX = Math.abs(normal[0]);
-  const absY = Math.abs(normal[1]);
-  const absZ = Math.abs(normal[2]);
+  const a = [Math.abs(normal[0]), Math.abs(normal[1]), Math.abs(normal[2])];
+  if (a[0] === 0 && a[1] === 0 && a[2] === 0) return null;
 
-  // Find which component is dominant (closest to 1)
-  if (absZ > absX && absZ > absY) {
-    // Looking along Z axis -> XY plane
-    return "xy";
-  } else if (absY > absX && absY > absZ) {
-    // Looking along Y axis -> XZ plane
-    return "xz";
-  } else if (absX > absY && absX > absZ) {
-    // Looking along X axis -> YZ plane
-    return "yz";
+  // Argmax with ties favoring later axes (Z > Y > X).
+  let domAxis = 0;
+  if (a[1] >= a[domAxis]) domAxis = 1;
+  if (a[2] >= a[domAxis]) domAxis = 2;
+
+  switch (domAxis) {
+    case 0: // X-dominant normal → YZ panel
+      return "yz";
+    case 1: // Y-dominant normal → XZ panel
+      return "xz";
+    case 2: // Z-dominant normal → XY panel
+      return "xy";
+    default:
+      return null;
   }
-
-  return null;
 }
 
 /**
@@ -67,7 +76,7 @@ class PanelMinimap extends RefCounted {
 
   constructor(
     private viewer: Viewer,
-    _panel: any, // Kept for potential future use
+    private panel: any, // SliceViewPanel (need .sliceView for projectionParameters)
     private panelElement: HTMLElement,
     private orientation: Orientation
   ) {
@@ -166,6 +175,15 @@ class PanelMinimap extends RefCounted {
       })
     );
 
+    // Panel projection changes — fires on R/E rotation, panel resize, etc.
+    // Without this, the rotated viewport indicator stays stale.
+    const projParams = this.panel?.sliceView?.projectionParameters;
+    if (projParams?.changed?.add) {
+      this.registerDisposer(
+        projParams.changed.add(() => this.scheduleRender())
+      );
+    }
+
     // Mouse interactions
     this.canvas.addEventListener("mousedown", this.onMouseDown.bind(this));
     this.canvas.addEventListener("mousemove", this.onMouseMove.bind(this));
@@ -205,26 +223,36 @@ class PanelMinimap extends RefCounted {
     ctx.textBaseline = "top";
     ctx.fillText(this.orientation.toUpperCase(), width - 4, 3);
 
-    // Draw viewport indicator
-    const viewport = this.calculateViewport();
-    if (viewport) {
-      const x = viewport.x * width;
-      const y = viewport.y * height;
-      const w = viewport.w * width;
-      const h = viewport.h * height;
+    // Draw viewport indicator (rotated polygon if panel is rotated)
+    const corners = this.calculateViewportCorners();
+    if (corners) {
+      ctx.beginPath();
+      for (let i = 0; i < corners.length; i++) {
+        const x = corners[i].x * width;
+        const y = corners[i].y * height;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.closePath();
 
-      // Semi-transparent fill
       ctx.fillStyle = VIEWPORT_COLOR + "22";
-      ctx.fillRect(x, y, w, h);
+      ctx.fill();
 
-      // Border
       ctx.strokeStyle = VIEWPORT_COLOR;
       ctx.lineWidth = VIEWPORT_BORDER_WIDTH;
-      ctx.strokeRect(x, y, w, h);
+      ctx.stroke();
     }
   }
 
-  private calculateViewport(): { x: number; y: number; w: number; h: number } | null {
+  /**
+   * Compute the four corners of the viewport in normalized minimap coords.
+   * The viewport rectangle is built in WORLD space using the panel's
+   * screen-right/screen-up vectors (extracted from invViewMatrix), then
+   * projected onto the minimap's two axes (hIdx, vIdx). This makes the
+   * indicator rotate correctly when the panel is spun with R/E even though
+   * the dataset bounding box stays in the global frame.
+   */
+  private calculateViewportCorners(): { x: number; y: number }[] | null {
     const boundsInfo = this.getDatasetBounds();
     if (!boundsInfo) return null;
 
@@ -232,31 +260,69 @@ class PanelMinimap extends RefCounted {
     const bounds = space.bounds;
     const { width: dataW, height: dataH, hIdx, vIdx } = boundsInfo;
 
-    // Current position (center of view)
     const pos = this.viewer.position.value;
     if (!pos || pos.length < 3) return null;
 
-    // Get zoom level (voxels per screen pixel)
-    const zoom = this.viewer.crossSectionScale.value;
+    const projParams = this.panel?.sliceView?.projectionParameters?.value;
+    const invView = projParams?.invViewMatrix as Float32Array | undefined;
 
-    // Get panel size for visible extent calculation
+    // Panel size in render pixels (projParams.width/height are authoritative;
+    // panelRect is a fallback if projection params aren't ready yet).
     const panelRect = this.panelElement.getBoundingClientRect();
-    const visibleW = panelRect.width * zoom;
-    const visibleH = panelRect.height * zoom;
+    const panelW: number = projParams?.width ?? panelRect.width;
+    const panelH: number = projParams?.height ?? panelRect.height;
 
-    // Normalize to [0-1]
-    const centerX = (pos[hIdx] - bounds.lowerBounds[hIdx]) / dataW;
-    const centerY = (pos[vIdx] - bounds.lowerBounds[vIdx]) / dataH;
-    const normW = Math.min(1, visibleW / dataW);
-    const normH = Math.min(1, visibleH / dataH);
+    // mat4 is column-major. invViewMatrix columns 0/1 are the world-space
+    // displacement vectors per panel-X / panel-Y pixel — they ALREADY include
+    // the pixelSize / zoom scale (see SliceView.projectionParameters update in
+    // sliceview/frontend.ts). So multiplying by panelW/2 and panelH/2 alone
+    // gives the half-extents in world units, no extra pixelSize factor.
+    let rightH: number;
+    let rightV: number;
+    let upH: number;
+    let upV: number;
 
-    return {
-      x: Math.max(0, Math.min(1 - normW, centerX - normW / 2)),
-      y: Math.max(0, Math.min(1 - normH, centerY - normH / 2)),
-      w: normW,
-      h: normH,
-    };
+    if (invView && invView.length >= 16) {
+      rightH = invView[hIdx];
+      rightV = invView[vIdx];
+      upH = invView[hIdx + 4];
+      upV = invView[vIdx + 4];
+    } else {
+      // Fallback: assume axis-aligned panel and use crossSectionScale as
+      // world-per-pixel (matches pre-rotation behavior).
+      const zoom = this.viewer.crossSectionScale.value ?? 1;
+      rightH = zoom;
+      rightV = 0;
+      upH = 0;
+      upV = zoom;
+    }
+
+    const halfW = panelW / 2;
+    const halfH = panelH / 2;
+
+    const cx = pos[hIdx];
+    const cy = pos[vIdx];
+    const lowH = bounds.lowerBounds[hIdx];
+    const lowV = bounds.lowerBounds[vIdx];
+
+    const offsets: [number, number][] = [
+      [-1, -1],
+      [1, -1],
+      [1, 1],
+      [-1, 1],
+    ];
+    const corners: { x: number; y: number }[] = [];
+    for (const [sx, sy] of offsets) {
+      const wH = cx + sx * halfW * rightH + sy * halfH * upH;
+      const wV = cy + sx * halfW * rightV + sy * halfH * upV;
+      corners.push({
+        x: (wH - lowH) / dataW,
+        y: (wV - lowV) / dataH,
+      });
+    }
+    return corners;
   }
+
 
   private onClick(e: MouseEvent) {
     if (this.isDragging) return;
