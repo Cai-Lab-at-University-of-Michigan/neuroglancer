@@ -86,6 +86,11 @@ export class DrawingTool extends RefCounted {
     } else if (promptMode === "lasso") {
       const url = this.makeLassoCursor();
       cursor = `url("${url}") 7 25, default`;
+    } else if (mode === "navigate") {
+      // Hand tool: drag-to-pan. Use grab as the static cursor; the
+      // mousedown/mouseup listeners in drawing_tool_handler swap to
+      // grabbing while a drag is in progress.
+      cursor = "grab";
     } else if (mode) {
       cursor = "crosshair";
     }
