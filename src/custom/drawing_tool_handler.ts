@@ -1,5 +1,6 @@
 import type { DrawingTool } from "#src/custom/drawing_tool.js";
 import { initMinimap, getMinimap } from "#src/custom/minimap.js";
+import { initViewportHandler } from "#src/custom/viewport_handler.js";
 import { ALLOWED_UNITS } from "#src/widget/scale_bar.js";
 // [BUG-016] Import annotation types for rendering seed prompts as 3D annotations
 // instead of canvas overlay dots (so they track with zoom/pan/Z scroll)
@@ -399,6 +400,11 @@ function calculatePhysicalSizePerVoxel(viewer: any): number[] | null {
 export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
   const { canvas, ctx, viewer } = drawingTool;
   const container = viewer.display.container as HTMLElement;
+
+  // Viewport channel — parent asks for the crosshair position so the
+  // ECDF endpoint can localize histogram sampling to the region the
+  // user is actually viewing.
+  initViewportHandler(viewer);
 
   const getPixelSize = () => {
     const ppp = calculatePhysicalSizePerPixel(viewer);
