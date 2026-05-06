@@ -28,3 +28,40 @@
 .neuroglancer-minimap.dragging {
   cursor: grabbing;
 }
+
+/* Resize handle in the top-left corner. Anchored to top-left because
+   the minimap itself is bottom-right anchored, so dragging toward the
+   top-left grows it and toward the bottom-right shrinks it. */
+.neuroglancer-minimap-resize-handle {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
+  z-index: 2;
+  /* Diagonal grip lines for visual affordance. */
+  background:
+    linear-gradient(
+      135deg,
+      transparent 0,
+      transparent 4px,
+      rgba(255, 255, 255, 0.6) 4px,
+      rgba(255, 255, 255, 0.6) 5px,
+      transparent 5px,
+      transparent 8px,
+      rgba(255, 255, 255, 0.6) 8px,
+      rgba(255, 255, 255, 0.6) 9px,
+      transparent 9px
+    );
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.neuroglancer-minimap:hover .neuroglancer-minimap-resize-handle {
+  opacity: 1;
+}
+
+.neuroglancer-minimap.resizing {
+  cursor: nwse-resize;
+}
