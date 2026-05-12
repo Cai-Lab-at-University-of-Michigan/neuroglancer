@@ -236,6 +236,20 @@ function isOnDataPanel(e: MouseEvent): boolean {
   return !!(e.target as HTMLElement).closest(DATA_PANEL_SELECTOR);
 }
 
+// Hand tool: temporarily override the grab cursor (set by drawing_tool.ts
+// applyMode when activeMode === "navigate") to grabbing while a drag is
+// in progress. Uses !important to win against drawing_tool's periodic
+// cursor enforcement timer.
+function setNavigateGrabbing(grabbing: boolean) {
+  document.querySelectorAll(DATA_PANEL_SELECTOR).forEach((el) => {
+    if (grabbing) {
+      (el as HTMLElement).style.setProperty("cursor", "grabbing", "important");
+    } else {
+      (el as HTMLElement).style.removeProperty("cursor");
+    }
+  });
+}
+
 function voxelPoint(viewer: any): StrokePoint {
   const p = viewer?.mouseState?.position;
   if (!p || p.length < 3) return { x: NaN, y: NaN, z: NaN };
@@ -477,6 +491,9 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
   const onMouseDown = (e: MouseEvent) => {
     const mode = drawingTool.activeMode.value;
     const promptMode = drawingTool.promptMode.value;
+    // Hand tool (navigate mode): explicit user intent to pan. Don't intercept
+    // — let Neuroglancer's default navigation handlers take the mousedown.
+    if (mode === "navigate") return;
     const promptPolarity = drawingTool.promptPolarity.value;
     if ((!mode && !promptMode) || e.button !== 0) return;
 
@@ -709,6 +726,13 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
     const mode = drawingTool.activeMode.value;
     const promptMode = drawingTool.promptMode.value;
 
+    // Hand tool (navigate mode): explicit user intent to pan. Skip the
+    // block entirely so NG's default pan handler can take the mousedown.
+    if (mode === "navigate") {
+      setNavigateGrabbing(true); // grab → grabbing during drag
+      return;
+    }
+
     // If no drawing/prompt mode is active, block ALL clicks to prevent navigation
     if (!mode && !promptMode) {
       e.preventDefault();
@@ -727,6 +751,8 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
   // Block keyboard navigation when locked (arrow keys, etc.)
   container.addEventListener("keydown", (e: KeyboardEvent) => {
     if (!lockedBBox) return;
+    // Hand tool: explicit nav intent, allow nav keys.
+    if (drawingTool.activeMode.value === "navigate") return;
 
     // Block navigation keys on slice panels
     const navKeys = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown"];
@@ -738,6 +764,13 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
       e.stopPropagation();
     }
   }, { capture: true });
+
+  // Hand tool cursor toggle: restore grab when drag ends.
+  container.addEventListener("mouseup", () => {
+    if (drawingTool.activeMode.value === "navigate") {
+      setNavigateGrabbing(false);
+    }
+  });
 
   // -- Redraw locked indicator on resize ------------------------------------
   let resizeTimeout: ReturnType<typeof setTimeout> | null = null;
