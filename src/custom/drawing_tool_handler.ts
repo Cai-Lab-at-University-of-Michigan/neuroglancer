@@ -1558,6 +1558,32 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
     }
   }, true); // capture phase
 
+  // A press is enough for a shortcut that acts once, and every shortcut so far
+  // has been one. A hold-to-use key is not: the panel needs to know when the
+  // key came back up, and until now it had no way to find out, because the
+  // keydown above swallows the event and the panel never sees the key at all.
+  //
+  // Only keys the panel declared are reported, so this adds nothing on a page
+  // where no plugin is active. The release is swallowed on the same terms the
+  // press was: if a modifier was down the press went through to neuroglancer,
+  // and taking its release away would leave neuroglancer holding a key that is
+  // no longer down.
+  document.addEventListener("keyup", (e: KeyboardEvent) => {
+    if (!activePluginId) return;
+    const key = e.key.toLowerCase();
+    if (!activePluginKeys.has(key)) return;
+
+    if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    }
+    window.parent.postMessage({
+      type: "plugin_shortcut_up",
+      key,
+      pluginId: activePluginId,
+    }, "*");
+  }, true); // capture phase
+
   function activatePluginBindings(pluginId: string, shortcuts: string[]) {
     activePluginId = pluginId;
     activePluginKeys = new Set(shortcuts.map(k => k.toLowerCase()));
