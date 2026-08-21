@@ -5,13 +5,21 @@ import { ALLOWED_UNITS } from "#src/widget/scale_bar.js";
 // [BUG-016] Import annotation types for rendering seed prompts as 3D annotations
 // instead of canvas overlay dots (so they track with zoom/pan/Z scroll)
 import { AnnotationType, makeAnnotationId } from "#src/annotation/index.js";
+import type {
+  Prompt,
+  PromptBBox,
+  PromptLasso,
+  PromptPoint,
+  PromptScribble,
+  StrokePoint,
+} from "#src/custom/prompt_annotations.js";
+import {
+  isValidPoint,
+  makeAnnotationPoint,
+  promptAnnotations,
+  promptFromPanel,
+} from "#src/custom/prompt_annotations.js";
 import { makeLayer } from "#src/layer/index.js";
-
-interface StrokePoint {
-  x: number;
-  y: number;
-  z: number;
-}
 
 interface BaseStroke {
   mode: string;
@@ -26,32 +34,6 @@ interface BrushStroke extends BaseStroke {
   points: StrokePoint[];
 }
 
-interface PromptPoint {
-  mode: "point";
-  point: StrokePoint;
-  polarity: "positive" | "negative";
-}
-
-interface PromptBBox {
-  mode: "bbox";
-  startPoint: StrokePoint;
-  endPoint: StrokePoint;
-  polarity: "positive" | "negative";
-}
-
-interface PromptScribble {
-  mode: "scribble";
-  points: StrokePoint[];
-  polarity: "positive" | "negative";
-}
-
-interface PromptLasso {
-  mode: "lasso";
-  points: StrokePoint[];
-  polarity: "positive" | "negative";
-}
-
-type Prompt = PromptPoint | PromptBBox | PromptScribble | PromptLasso;
 type Stroke = BrushStroke;
 
 const DATA_PANEL_SELECTOR = ".neuroglancer-rendered-data-panel";
@@ -209,10 +191,6 @@ function sendAnnotationStateUpdate(parent: Window) {
   }, "*");
 }
 
-function isValidPoint(p: StrokePoint): boolean {
-  return isFinite(p.x) && isFinite(p.y) && isFinite(p.z);
-}
-
 function isInDataBounds(viewer: any): boolean {
   const pos = viewer?.mouseState?.position;
   const bounds = viewer?.coordinateSpace?.value?.bounds;
@@ -323,21 +301,33 @@ function getPromptAnnotationSource(viewer: any, polarity: "positive" | "negative
   return null;
 }
 
-// [BUG-016] Build a Float32Array point in NG coordinate space order
-function makeAnnotationPoint(viewer: any, pt: StrokePoint): Float32Array {
-  const coordSpace = viewer?.coordinateSpace?.value;
-  const names = coordSpace?.names;
-  const ndim = names?.length ?? 3;
-  const arr = new Float32Array(ndim);
-  if (names) {
-    const ix = names.indexOf("x"), iy = names.indexOf("y"), iz = names.indexOf("z");
-    if (ix >= 0) arr[ix] = pt.x;
-    if (iy >= 0) arr[iy] = pt.y;
-    if (iz >= 0) arr[iz] = pt.z;
-  } else {
-    arr[0] = pt.x; arr[1] = pt.y; arr[2] = pt.z;
+// Add a finished prompt to its layer. The annotation source is created lazily
+// and is not ready on the very first prompt of a session, which is why the
+// point path already retried; the retry is shared here so a box or a scribble
+// drawn first is not the one that goes missing.
+function addPromptAnnotation(viewer: any, prompt: Prompt): void {
+  const annotations = promptAnnotations(viewer, prompt);
+  if (annotations.length === 0) return;
+
+  const put = (source: any) => {
+    for (const annotation of annotations) {
+      try {
+        source.add(annotation);
+      } catch (e) {
+        console.warn("[prompt] failed to add annotation:", e);
+      }
+    }
+  };
+
+  const source = getPromptAnnotationSource(viewer, prompt.polarity);
+  if (source) {
+    put(source);
+    return;
   }
-  return arr;
+  setTimeout(() => {
+    const retry = getPromptAnnotationSource(viewer, prompt.polarity);
+    if (retry) put(retry);
+  }, 200);
 }
 
 function convertLength(value: number, fromUnit: string, toUnit: string): number {
@@ -618,11 +608,18 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
       drawingTool.snapshot = ctx.getImageData(0, 0, canvas.width, canvas.height);
     } else if (promptMode === "scribble") {
       currentPrompt = { mode: "scribble", points: [], polarity: promptPolarity };
+      // Snapshot for the same reason bbox takes one: what is drawn during the
+      // drag is a screen-space preview, and the commit puts the canvas back to
+      // this before handing the prompt to the annotation layer. Restoring
+      // rather than clearing keeps anything else already on the overlay --
+      // uncommitted brush strokes, the locked-region indicator.
+      drawingTool.snapshot = ctx.getImageData(0, 0, canvas.width, canvas.height);
       ctx.beginPath();
       ctx.moveTo(cx, cy);
       if (isValidPoint(pt)) (currentPrompt as PromptScribble).points.push({ ...pt });
     } else if (promptMode === "lasso") {
       currentPrompt = { mode: "lasso", points: [], polarity: promptPolarity };
+      drawingTool.snapshot = ctx.getImageData(0, 0, canvas.width, canvas.height);
       ctx.beginPath();
       ctx.moveTo(cx, cy);
       if (isValidPoint(pt)) (currentPrompt as PromptLasso).points.push({ ...pt });
@@ -660,9 +657,21 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
         finishCapture();
       }
       if (currentPrompt) {
+        // The prompt leaves the overlay and becomes an annotation, so it
+        // follows the data instead of the screen. finishCapture drops the
+        // snapshot, so the preview has to be wiped before it is called.
+        const preview = drawingTool.snapshot;
+        if (preview) {
+          ctx.save();
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
+          ctx.putImageData(preview, 0, 0);
+          ctx.restore();
+        }
+        addPromptAnnotation(viewer, currentPrompt);
         promptData.push(currentPrompt);
         currentPrompt = null;
         finishCapture();
+        safeRedraw(viewer);
         window.parent.postMessage({ type: "prompt_complete", prompts: promptData }, "*");
       }
     };
@@ -927,28 +936,19 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
         drawLockedRegionIndicator(ctx, canvas, viewer, lockedBBox);
       }
 
-      // Re-add saved prompts as annotations
+      // Re-add saved prompts as annotations.
+      //
+      // This used to skip everything that was not a point, which quietly made
+      // a restore destructive: the panel sends the whole list on a neuron
+      // switch or an undo, and every box and scribble in it was dropped from
+      // promptData. The next prompt the user drew was then reported back to
+      // the panel on top of a list those prompts were no longer in.
       const restoredPrompts = event.data?.prompts || [];
       for (const p of restoredPrompts) {
-        if (p.type !== "point" || !p.data) continue;
-        const pol = p.polarity || "positive";
-        const pt = { x: p.data.x ?? 0, y: p.data.y ?? 0, z: p.data.z ?? 0 };
-        const prompt: PromptPoint = { mode: "point", point: pt, polarity: pol };
+        const prompt = promptFromPanel(p);
+        if (!prompt) continue;
         promptData.push(prompt);
-
-        const source = getPromptAnnotationSource(viewer, pol);
-        if (source) {
-          try {
-            source.add({
-              type: AnnotationType.POINT,
-              id: makeAnnotationId(),
-              point: makeAnnotationPoint(viewer, pt),
-              description: `${pol} seed`,
-              properties: [],
-              relatedSegments: [],
-            });
-          } catch {}
-        }
+        addPromptAnnotation(viewer, prompt);
       }
       safeRedraw(viewer);
       return;
