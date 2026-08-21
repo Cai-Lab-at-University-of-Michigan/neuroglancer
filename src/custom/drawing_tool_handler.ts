@@ -13,6 +13,7 @@ import type {
   StrokePoint,
 } from "#src/custom/prompt_annotations.js";
 import {
+  isPromptOnSlice,
   isValidPoint,
   promptAnnotations,
   promptFromPanel,
@@ -273,14 +274,23 @@ interface SeedLayerSpec {
   vertexMarkers: boolean;
 }
 
-// The marker size and border are the polyline's own defaults, read off
-// polyline.ts (ng_PolyMarkerDiameter = 5.0, ng_PolyMarkerBorderWidth = 1.0).
-// A point annotation defaults to a smaller dot with no border at all, which is
-// what made a placed seed hard to see; setting both from the same numbers here
-// is what makes a point and a vertex look alike rather than merely similar.
-const SEED_MARKER_DIAMETER = 5.0;
+// A vertex marker on a polyline is sized in SCREEN PIXELS: polyline.ts sets
+// ng_PolyMarkerDiameter = 5.0 and ng_PolyMarkerBorderWidth = 1.0 and emits the
+// shape at that size directly.
+//
+// A point marker is not. setPointMarkerSize takes what point.ts calls a
+// voxelSize -- "dimensionless, scales with zoom" -- and the shader multiplies
+// it by a zoom factor clamped to [0.5, 3.0] before clamping the result to
+// [0.5, 100.0]. So the same number in both places is not the same mark: 5.0
+// reaches 15 pixels zoomed in, which is why the first attempt at matching them
+// came out far too big. There is no value that makes them identical at every
+// zoom; this one lands near the vertex marker over the usable range.
+const SEED_POINT_MARKER_SIZE = 2.0;
+const SEED_VERTEX_MARKER_DIAMETER = 5.0;
 const SEED_MARKER_BORDER = 1.0;
-const SEED_LINE_WIDTH = 2.0;
+/** polyline.ts's own ng_PolyLineWidth default. Set rather than left implicit so
+ *  that every seed layer draws the same weight. */
+const SEED_LINE_WIDTH = 1.0;
 
 const SEED_LAYERS: Record<SeedLayerKind, SeedLayerSpec> = {
   pos: { name: "__seeds_pos", color: [0, 1, 0], vertexMarkers: true },
@@ -296,21 +306,40 @@ function seedLayerKind(prompt: Prompt): SeedLayerKind {
   return prompt.mode === "scribble" ? (`${base}_line` as SeedLayerKind) : base;
 }
 
+// One body, one colour substituted in: polarity must be the ONLY difference a
+// seed's appearance shows.
 function seedLayerShader(spec: SeedLayerSpec): string {
   const [r, g, b] = spec.color;
-  const markerSize = spec.vertexMarkers ? SEED_MARKER_DIAMETER : 0.0;
-  const markerBorder = spec.vertexMarkers ? SEED_MARKER_BORDER : 0.0;
+  const vertexSize = spec.vertexMarkers ? SEED_VERTEX_MARKER_DIAMETER : 0.0;
+  const vertexBorder = spec.vertexMarkers ? SEED_MARKER_BORDER : 0.0;
   return `
 void main() {
   setColor(vec4(${r.toFixed(1)}, ${g.toFixed(1)}, ${b.toFixed(1)}, 1.0));
-  setPointMarkerSize(${SEED_MARKER_DIAMETER.toFixed(1)});
+  setPointMarkerSize(${SEED_POINT_MARKER_SIZE.toFixed(1)});
   setPointMarkerBorderWidth(${SEED_MARKER_BORDER.toFixed(1)});
   setPointMarkerBorderColor(vec4(0.0, 0.0, 0.0, 0.85));
-  setEndpointMarkerSize(${markerSize.toFixed(1)});
-  setEndpointMarkerBorderWidth(${markerBorder.toFixed(1)});
+  setEndpointMarkerSize(${vertexSize.toFixed(1)});
+  setEndpointMarkerBorderWidth(${vertexBorder.toFixed(1)});
   setLineWidth(${SEED_LINE_WIDTH.toFixed(1)});
 }
 `;
+}
+
+// Put our shader on the layer whether we created it or found one already there.
+//
+// A layer that came back with the scene rather than from makeLayer here carries
+// whatever spec it was saved with -- an older colour, an older marker size, or
+// no shader at all -- and a seed drawn into it then looks nothing like its
+// opposite number. Idempotent, so it costs nothing on the layers we did create.
+function applySeedLayerShader(managedLayer: any, spec: SeedLayerSpec) {
+  const shader = managedLayer?.layer?.annotationDisplayState?.shader;
+  if (!shader) return;
+  const wanted = seedLayerShader(spec);
+  try {
+    if (shader.value !== wanted) shader.value = wanted;
+  } catch (e) {
+    console.warn(`[prompt] failed to set the shader on ${spec.name}:`, e);
+  }
 }
 
 const _promptSources: Record<SeedLayerKind, any> = {
@@ -341,6 +370,7 @@ function getPromptAnnotationSource(viewer: any, kind: SeedLayerKind): any {
   // Look for existing layer (may have been created but source not yet ready)
   for (const managedLayer of viewer.layerManager.managedLayers) {
     if (managedLayer.name === spec.name) {
+      applySeedLayerShader(managedLayer, spec);
       const source = managedLayer.layer?.localAnnotations;
       if (source) {
         _promptSources[kind] = source;
@@ -371,34 +401,77 @@ function getPromptAnnotationSource(viewer: any, kind: SeedLayerKind): any {
   return null;
 }
 
-// Add a finished prompt to its layer. The annotation source is created lazily
-// and is not ready on the very first prompt of a session, which is why the
-// point path already retried; the retry is shared here so a box or a scribble
-// drawn first is not the one that goes missing.
-function addPromptAnnotation(viewer: any, prompt: Prompt): void {
-  const annotations = promptAnnotations(viewer, prompt);
-  if (annotations.length === 0) return;
+/** The slice the viewer is currently showing, in the image's own Z. */
+function currentSliceZ(viewer: any): number | null {
+  const pos = viewer?.navigationState?.position?.value;
+  const names = viewer?.coordinateSpace?.value?.names;
+  if (!pos || !names) return null;
+  const iz = names.indexOf("z");
+  if (iz < 0) return null;
+  const z = pos[iz];
+  return isFinite(z) ? z : null;
+}
 
-  const put = (source: any) => {
-    for (const annotation of annotations) {
-      try {
-        source.add(annotation);
-      } catch (e) {
-        console.warn("[prompt] failed to add annotation:", e);
+/** Which slice the seed layers were last built for, so a move within one slice
+ *  does not rebuild them. */
+let lastRenderedSlice: number | null = null;
+let promptRenderRetry: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Rebuild the seed layers from promptData, keeping only what belongs to the
+ * slice on screen.
+ *
+ * A full rebuild rather than an incremental add: the set changes on a Z move as
+ * well as on a new prompt, so there is one code path and no bookkeeping about
+ * which annotation stands for which prompt.
+ */
+function renderPromptAnnotations(viewer: any, force = false): void {
+  const sliceZ = currentSliceZ(viewer);
+  if (sliceZ === null) return;
+  const slice = Math.round(sliceZ);
+  if (!force && slice === lastRenderedSlice) return;
+  lastRenderedSlice = slice;
+
+  const visible = new Map<SeedLayerKind, Prompt[]>();
+  for (const kind of SEED_LAYER_KINDS) visible.set(kind, []);
+  for (const prompt of promptData) {
+    if (!isPromptOnSlice(prompt, sliceZ)) continue;
+    visible.get(seedLayerKind(prompt))!.push(prompt);
+  }
+
+  // A layer is created lazily and its source is not ready on the first prompt
+  // of a session. Anything with prompts waiting for it asks for one more pass.
+  let waiting = false;
+  for (const kind of SEED_LAYER_KINDS) {
+    const source = getPromptAnnotationSource(viewer, kind);
+    const prompts = visible.get(kind)!;
+    if (!source) {
+      if (prompts.length > 0) waiting = true;
+      continue;
+    }
+    try {
+      source.clear();
+    } catch (e) {
+      console.warn(`[prompt] failed to clear ${SEED_LAYERS[kind].name}:`, e);
+    }
+    for (const prompt of prompts) {
+      for (const annotation of promptAnnotations(viewer, prompt)) {
+        try {
+          source.add(annotation);
+        } catch (e) {
+          console.warn("[prompt] failed to add annotation:", e);
+        }
       }
     }
-  };
-
-  const kind = seedLayerKind(prompt);
-  const source = getPromptAnnotationSource(viewer, kind);
-  if (source) {
-    put(source);
-    return;
   }
-  setTimeout(() => {
-    const retry = getPromptAnnotationSource(viewer, kind);
-    if (retry) put(retry);
-  }, 200);
+
+  if (waiting && promptRenderRetry === null) {
+    promptRenderRetry = setTimeout(() => {
+      promptRenderRetry = null;
+      renderPromptAnnotations(viewer, true);
+    }, 200);
+  }
+  safeRedraw(viewer);
 }
 
 function convertLength(value: number, fromUnit: string, toUnit: string): number {
@@ -613,11 +686,10 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
         // which it never is on the first click of a session. That dot then sat
         // at fixed pixels for the rest of the session unless a later retry
         // happened to clear the whole overlay, which is the same defect the
-        // boxes and scribbles had. addPromptAnnotation retries instead of
-        // drawing something wrong in the meantime.
-        addPromptAnnotation(viewer, prompt);
-
+        // boxes and scribbles had. The renderer retries instead of drawing
+        // something wrong in the meantime.
         promptData.push(prompt);
+        renderPromptAnnotations(viewer, true);
         finishCapture();
         window.parent.postMessage({ type: "prompt_complete", prompts: promptData }, "*");
       }
@@ -686,11 +758,10 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
           ctx.putImageData(preview, 0, 0);
           ctx.restore();
         }
-        addPromptAnnotation(viewer, currentPrompt);
         promptData.push(currentPrompt);
         currentPrompt = null;
         finishCapture();
-        safeRedraw(viewer);
+        renderPromptAnnotations(viewer, true);
         window.parent.postMessage({ type: "prompt_complete", prompts: promptData }, "*");
       }
     };
@@ -961,9 +1032,8 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
         const prompt = promptFromPanel(p);
         if (!prompt) continue;
         promptData.push(prompt);
-        addPromptAnnotation(viewer, prompt);
       }
-      safeRedraw(viewer);
+      renderPromptAnnotations(viewer, true);
       return;
     }
     if (type === "drawing_snapshot") {
@@ -1401,6 +1471,10 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
         positionRafId = window.requestAnimationFrame(() => {
           positionRafId = null;
           sendPositionUpdate();
+          // A prompt belongs to the slice it was drawn on, so the seed layers
+          // follow Z. Rebuilt only when the slice index actually changes, so
+          // dragging within one slice costs nothing.
+          renderPromptAnnotations(viewer);
         });
       }
     });

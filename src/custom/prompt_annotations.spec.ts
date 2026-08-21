@@ -14,9 +14,11 @@ import { describe, expect, it } from "vitest";
 
 import { AnnotationType } from "#src/annotation/index.js";
 import {
+  isPromptOnSlice,
   makeAnnotationPoint,
   promptAnnotations,
   promptFromPanel,
+  promptZ,
 } from "#src/custom/prompt_annotations.js";
 
 /** A viewer whose coordinate space is in the given dimension order. */
@@ -231,5 +233,87 @@ describe("promptFromPanel reads back every shape the panel sends", () => {
     expect(promptFromPanel({ type: "point", data: {} })?.polarity).toBe(
       "positive",
     );
+  });
+});
+
+describe("a prompt belongs to the slice it was drawn on", () => {
+  // Neuroglancer will not do this for us: its cross-section fade is scaled to
+  // the slice view's depth range, which is deep enough that scrolling away
+  // barely dims anything, and its per-dimension clip is inert whenever Z is one
+  // of the displayed dimensions -- which it is in any multi-panel layout. So a
+  // box drawn on one slice stayed legible on all of them.
+  const at = (z: number) => ({ x: 1, y: 1, z });
+
+  const point = (z: number) => ({
+    mode: "point" as const,
+    point: at(z),
+    polarity: "positive" as const,
+  });
+  const bbox = (zA: number, zB: number) => ({
+    mode: "bbox" as const,
+    startPoint: at(zA),
+    endPoint: at(zB),
+    polarity: "positive" as const,
+  });
+  const scribble = (...zs: number[]) => ({
+    mode: "scribble" as const,
+    points: zs.map(at),
+    polarity: "positive" as const,
+  });
+
+  it("reads the slice off each shape", () => {
+    expect(promptZ(point(7))).toBe(7);
+    expect(promptZ(bbox(7, 7))).toBe(7);
+    expect(promptZ(scribble(7, 7, 7))).toBe(7);
+  });
+
+  it("agrees with the corner the rectangle is actually flattened onto", () => {
+    // promptAnnotations puts every corner on the FIRST corner's Z. If the
+    // slice test read the other one, a box could be culled on the very slice
+    // it is drawn on.
+    const box = bbox(7, 9);
+    const [annotation] = promptAnnotations(XYZ, box);
+    const drawnZ = annotation.points[0][2];
+    expect(promptZ(box)).toBe(drawnZ);
+    expect(isPromptOnSlice(box, drawnZ)).toBe(true);
+  });
+
+  it("takes the slice from the first sample that landed on the data", () => {
+    // A stray non-finite sample must not decide which slice the shape is on.
+    expect(
+      promptZ({
+        mode: "scribble",
+        points: [{ x: Number.NaN, y: Number.NaN, z: Number.NaN }, at(4), at(4)],
+        polarity: "positive",
+      }),
+    ).toBe(4);
+    expect(promptZ(bbox(Number.NaN, 9))).toBe(9);
+  });
+
+  it("has no slice when nothing landed on the data", () => {
+    expect(promptZ(point(Number.NaN))).toBe(null);
+    expect(promptZ(scribble())).toBe(null);
+  });
+
+  it("shows on its own slice and not on the next one", () => {
+    expect(isPromptOnSlice(point(7), 7)).toBe(true);
+    expect(isPromptOnSlice(point(7), 8)).toBe(false);
+    expect(isPromptOnSlice(point(7), 6)).toBe(false);
+    // The slice position is a float and so is the click, so the window has to
+    // be a half voxel rather than an equality test.
+    expect(isPromptOnSlice(point(7), 7.4)).toBe(true);
+    expect(isPromptOnSlice(point(7), 7.6)).toBe(false);
+  });
+
+  it("is not shown when either side has no position", () => {
+    expect(isPromptOnSlice(point(Number.NaN), 7)).toBe(false);
+    expect(isPromptOnSlice(point(7), Number.NaN)).toBe(false);
+  });
+
+  it("keeps a whole scribble on one slice", () => {
+    // The drag cannot cross slices, so the whole path shares the first
+    // sample's Z; a per-point test would flicker the stroke in and out.
+    expect(isPromptOnSlice(scribble(3, 3, 3), 3)).toBe(true);
+    expect(isPromptOnSlice(scribble(3, 3, 3), 4)).toBe(false);
   });
 });

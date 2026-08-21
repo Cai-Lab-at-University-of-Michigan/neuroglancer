@@ -175,3 +175,52 @@ export function promptFromPanel(p: any): Prompt | null {
   }
   return null;
 }
+
+/**
+ * How far from a slice a prompt still counts as being on it.
+ *
+ * Half a voxel, so a prompt belongs to exactly one slice: the one it was drawn
+ * on. The coordinates are floats read off the mouse, and the slice position is
+ * a float too, so an equality test would match nothing.
+ */
+export const PROMPT_SLICE_TOLERANCE = 0.5;
+
+/**
+ * The slice a prompt was drawn on, or null if it never landed on the data.
+ *
+ * A drag cannot cross slices, so one coordinate speaks for the whole shape;
+ * taking the first valid one keeps a stray non-finite sample from deciding it.
+ */
+export function promptZ(prompt: Prompt): number | null {
+  if (prompt.mode === "point") {
+    return isValidPoint(prompt.point) ? prompt.point.z : null;
+  }
+  if (prompt.mode === "bbox") {
+    if (isValidPoint(prompt.startPoint)) return prompt.startPoint.z;
+    return isValidPoint(prompt.endPoint) ? prompt.endPoint.z : null;
+  }
+  for (const point of prompt.points) {
+    if (isValidPoint(point)) return point.z;
+  }
+  return null;
+}
+
+/**
+ * Whether a prompt belongs to the slice currently on screen.
+ *
+ * A prompt is an input the model was given at one Z. Neuroglancer's own
+ * cross-section fade is scaled to the slice view's depth range, which is deep
+ * enough that scrolling away barely dims anything, and its per-dimension clip
+ * is inert whenever Z is one of the displayed dimensions -- which it is in any
+ * multi-panel layout. So a box drawn on one slice stayed legible on all of
+ * them, which says the model was given something it was not.
+ */
+export function isPromptOnSlice(
+  prompt: Prompt,
+  sliceZ: number,
+  tolerance: number = PROMPT_SLICE_TOLERANCE,
+): boolean {
+  const z = promptZ(prompt);
+  if (z === null || !isFinite(sliceZ)) return false;
+  return Math.abs(z - sliceZ) <= tolerance;
+}
