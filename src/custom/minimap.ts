@@ -850,34 +850,11 @@ export class MinimapOverlay extends RefCounted {
     this.applyOrientationVisibility();
   }
 
-  setThumbnail(_url: string) {
-    // Thumbnails not needed - using plain background
-  }
-
-  /**
-   * Toggle visibility for a specific orientation (xy, xz, yz).
-   */
-  setOrientationEnabled(orientation: Orientation, enabled: boolean) {
-    this.orientationEnabled.set(orientation, enabled);
-    this.applyOrientationVisibility();
-  }
-
   /**
    * Get current visibility state for an orientation.
    */
   isOrientationEnabled(orientation: Orientation): boolean {
     return this.orientationEnabled.get(orientation) ?? true;
-  }
-
-  /**
-   * Get visibility state for all orientations.
-   */
-  getOrientationState(): { xy: boolean; xz: boolean; zy: boolean } {
-    return {
-      xy: this.orientationEnabled.get("xy") ?? true,
-      xz: this.orientationEnabled.get("xz") ?? true,
-      zy: this.orientationEnabled.get("zy") ?? true,
-    };
   }
 
   private applyOrientationVisibility() {

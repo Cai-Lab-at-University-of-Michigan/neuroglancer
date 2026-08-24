@@ -180,15 +180,6 @@ function drawLockedRegionIndicator(
   }
 }
 
-function sendAnnotationStateUpdate(parent: Window) {
-  parent.postMessage({
-    type: "annotation_state_update",
-    strokeCount: strokeData.length,
-    canUndo: strokeData.length > 0,
-    canRedo: false,  // Redo now managed by backend
-  }, "*");
-}
-
 function isInDataBounds(viewer: any): boolean {
   const pos = viewer?.mouseState?.position;
   const bounds = viewer?.coordinateSpace?.value?.bounds;
@@ -670,7 +661,6 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
         }, "*");
 
         // Send state update to parent
-        sendAnnotationStateUpdate(window.parent);
 
         currentStroke = null;
         finishCapture();
@@ -856,34 +846,6 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
       drawingTool.applyMode();
       return;
     }
-    if (type === "annotation_undo") {
-      // Undo is managed by backend - just clear canvas and redraw
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      strokeData.length = 0;
-      if (lockedBBox) {
-        drawLockedRegionIndicator(ctx, canvas, viewer, lockedBBox);
-      }
-      sendAnnotationStateUpdate(window.parent);
-      safeRedraw(viewer);
-      return;
-    }
-    if (type === "annotation_redo") {
-      // Redo is managed by backend - just trigger redraw
-      sendAnnotationStateUpdate(window.parent);
-      safeRedraw(viewer);
-      return;
-    }
-    if (type === "annotation_clear") {
-      // Clear canvas overlay
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      strokeData.length = 0;
-      if (lockedBBox) {
-        drawLockedRegionIndicator(ctx, canvas, viewer, lockedBBox);
-      }
-      sendAnnotationStateUpdate(window.parent);
-      safeRedraw(viewer);
-      return;
-    }
     if (type === "annotation_state_sync") {
       // Sync visual state with backend annotation state
       const { strokeCount } = event.data;
@@ -894,7 +856,6 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
       if (lockedBBox) {
         drawLockedRegionIndicator(ctx, canvas, viewer, lockedBBox);
       }
-      sendAnnotationStateUpdate(window.parent);
       // Always trigger redraw to show updated LocalVolume data
       safeRedraw(viewer);
       return;
@@ -966,31 +927,6 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
       safeRedraw(viewer);
       return;
     }
-    if (type === "drawing_snapshot") {
-      canvas.toBlob((blob: Blob | null) => {
-        if (!blob) return;
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          window.parent.postMessage(
-            {
-              type: "drawing_snapshot_created",
-              imageData: reader.result,
-              strokes: JSON.parse(JSON.stringify(strokeData)),
-            },
-            "*",
-          );
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-          strokeData.length = 0;
-          // Redraw locked indicator if view is locked
-          if (lockedBBox) {
-            drawLockedRegionIndicator(ctx, canvas, viewer, lockedBBox);
-          }
-          safeRedraw(viewer);
-        };
-        reader.readAsDataURL(blob);
-      });
-      return;
-    }
     if (type === "segment_hover") {
       const segId = event.data.segmentId;
       for (const managedLayer of viewer?.layerManager?.managedLayers ?? []) {
@@ -1003,17 +939,6 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
           } else {
             selectionState.set(null);
           }
-        }
-      }
-      return;
-    }
-    if (type === "segment_recolor") {
-      for (const managedLayer of viewer?.layerManager?.managedLayers ?? []) {
-        const layer = (managedLayer as any)?.layer;
-        if (layer?.type !== "segmentation") continue;
-        const colorHash = layer?.displayState?.segmentationColorGroupState?.value?.segmentColorHash;
-        if (colorHash) {
-          colorHash.randomize();
         }
       }
       return;
@@ -1292,34 +1217,6 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
       const minimap = getMinimap();
       if (minimap) {
         minimap.setEnabled(event.data.enabled ?? true);
-      }
-      return;
-    }
-    if (type === "minimap_thumbnail") {
-      const minimap = getMinimap();
-      if (minimap && event.data.url) {
-        minimap.setThumbnail(event.data.url);
-      }
-      return;
-    }
-    if (type === "minimap_toggle_orientation") {
-      const minimap = getMinimap();
-      if (minimap) {
-        const { orientation, enabled } = event.data;
-        if (orientation && typeof enabled === "boolean") {
-          minimap.setOrientationEnabled(orientation, enabled);
-        }
-      }
-      return;
-    }
-    if (type === "minimap_get_state") {
-      const minimap = getMinimap();
-      if (minimap) {
-        const state = minimap.getOrientationState();
-        window.parent.postMessage(
-          { type: "minimap_state", state },
-          "*"
-        );
       }
       return;
     }
