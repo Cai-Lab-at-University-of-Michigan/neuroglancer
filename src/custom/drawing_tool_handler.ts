@@ -2,16 +2,22 @@ import type { DrawingTool } from "#src/custom/drawing_tool.js";
 import { initMinimap, getMinimap } from "#src/custom/minimap.js";
 import { initViewportHandler } from "#src/custom/viewport_handler.js";
 import { ALLOWED_UNITS } from "#src/widget/scale_bar.js";
-// [BUG-016] Import annotation types for rendering seed prompts as 3D annotations
-// instead of canvas overlay dots (so they track with zoom/pan/Z scroll)
-import { AnnotationType, makeAnnotationId } from "#src/annotation/index.js";
+// [BUG-016] Prompts are rendered as annotations rather than as canvas overlay
+// marks, so that the viewer positions them and they track zoom, pan and Z.
+import type {
+  Prompt,
+  PromptBBox,
+  PromptLasso,
+  PromptPoint,
+  PromptScribble,
+  StrokePoint,
+} from "#src/custom/prompt_annotations.js";
+import {
+  isValidPoint,
+  promptAnnotations,
+  promptFromPanel,
+} from "#src/custom/prompt_annotations.js";
 import { makeLayer } from "#src/layer/index.js";
-
-interface StrokePoint {
-  x: number;
-  y: number;
-  z: number;
-}
 
 interface BaseStroke {
   mode: string;
@@ -26,32 +32,6 @@ interface BrushStroke extends BaseStroke {
   points: StrokePoint[];
 }
 
-interface PromptPoint {
-  mode: "point";
-  point: StrokePoint;
-  polarity: "positive" | "negative";
-}
-
-interface PromptBBox {
-  mode: "bbox";
-  startPoint: StrokePoint;
-  endPoint: StrokePoint;
-  polarity: "positive" | "negative";
-}
-
-interface PromptScribble {
-  mode: "scribble";
-  points: StrokePoint[];
-  polarity: "positive" | "negative";
-}
-
-interface PromptLasso {
-  mode: "lasso";
-  points: StrokePoint[];
-  polarity: "positive" | "negative";
-}
-
-type Prompt = PromptPoint | PromptBBox | PromptScribble | PromptLasso;
 type Stroke = BrushStroke;
 
 const DATA_PANEL_SELECTOR = ".neuroglancer-rendered-data-panel";
@@ -209,10 +189,6 @@ function sendAnnotationStateUpdate(parent: Window) {
   }, "*");
 }
 
-function isValidPoint(p: StrokePoint): boolean {
-  return isFinite(p.x) && isFinite(p.y) && isFinite(p.z);
-}
-
 function isInDataBounds(viewer: any): boolean {
   const pos = viewer?.mouseState?.position;
   const bounds = viewer?.coordinateSpace?.value?.bounds;
@@ -278,66 +254,151 @@ function safeRedraw(viewer: any) {
   viewer?.display?.scheduleRedraw?.();
 }
 
-// [BUG-016] Helper to get or create dedicated annotation layers for prompt seeds.
-// Two layers: green for positive seeds, red for negative seeds.
-// Prompts rendered as NG annotations automatically track with zoom/pan/Z scroll.
-const _promptSources: { pos: any; neg: any } = { pos: null, neg: null };
-const _promptLayerCreated: { pos: boolean; neg: boolean } = { pos: false, neg: false };
+// [BUG-016] Dedicated annotation layers for prompt seeds, so that a prompt is
+// positioned by the viewer instead of being painted at fixed screen pixels.
+//
+// Four of them, because two things vary and neither can be expressed per
+// annotation without a property schema. Polarity picks the colour. Whether the
+// shape carries a marker at every vertex splits scribble off from the rest: a
+// scribble is a freehand stroke sampled every fraction of a pixel, and a dot on
+// each sample turns it into a dotted mess, while a lasso's vertices ARE the
+// shape the user drew and a box's corners read as handles.
+type SeedLayerKind = "pos" | "neg" | "pos_line" | "neg_line";
 
-function getPromptAnnotationSource(viewer: any, polarity: "positive" | "negative"): any {
-  const key = polarity === "positive" ? "pos" : "neg";
-  const layerName = polarity === "positive" ? "__seeds_pos" : "__seeds_neg";
-  const color = polarity === "positive" ? "#00ff00" : "#ff0000";
+interface SeedLayerSpec {
+  name: string;
+  /** Written into the shader, not into annotationColor: the colour then does
+   *  not depend on that property being honoured for a local layer. */
+  color: [number, number, number];
+  vertexMarkers: boolean;
+}
 
-  if (_promptSources[key]) return _promptSources[key];
+// The marker size and border are the polyline's own defaults, read off
+// polyline.ts (ng_PolyMarkerDiameter = 5.0, ng_PolyMarkerBorderWidth = 1.0).
+// A point annotation defaults to a smaller dot with no border at all, which is
+// what made a placed seed hard to see; setting both from the same numbers here
+// is what makes a point and a vertex look alike rather than merely similar.
+const SEED_MARKER_DIAMETER = 5.0;
+const SEED_MARKER_BORDER = 1.0;
+const SEED_LINE_WIDTH = 2.0;
+
+const SEED_LAYERS: Record<SeedLayerKind, SeedLayerSpec> = {
+  pos: { name: "__seeds_pos", color: [0, 1, 0], vertexMarkers: true },
+  neg: { name: "__seeds_neg", color: [1, 0, 0], vertexMarkers: true },
+  pos_line: { name: "__seeds_pos_line", color: [0, 1, 0], vertexMarkers: false },
+  neg_line: { name: "__seeds_neg_line", color: [1, 0, 0], vertexMarkers: false },
+};
+
+const SEED_LAYER_KINDS = Object.keys(SEED_LAYERS) as SeedLayerKind[];
+
+function seedLayerKind(prompt: Prompt): SeedLayerKind {
+  const base = prompt.polarity === "positive" ? "pos" : "neg";
+  return prompt.mode === "scribble" ? (`${base}_line` as SeedLayerKind) : base;
+}
+
+function seedLayerShader(spec: SeedLayerSpec): string {
+  const [r, g, b] = spec.color;
+  const markerSize = spec.vertexMarkers ? SEED_MARKER_DIAMETER : 0.0;
+  const markerBorder = spec.vertexMarkers ? SEED_MARKER_BORDER : 0.0;
+  return `
+void main() {
+  setColor(vec4(${r.toFixed(1)}, ${g.toFixed(1)}, ${b.toFixed(1)}, 1.0));
+  setPointMarkerSize(${SEED_MARKER_DIAMETER.toFixed(1)});
+  setPointMarkerBorderWidth(${SEED_MARKER_BORDER.toFixed(1)});
+  setPointMarkerBorderColor(vec4(0.0, 0.0, 0.0, 0.85));
+  setEndpointMarkerSize(${markerSize.toFixed(1)});
+  setEndpointMarkerBorderWidth(${markerBorder.toFixed(1)});
+  setLineWidth(${SEED_LINE_WIDTH.toFixed(1)});
+}
+`;
+}
+
+const _promptSources: Record<SeedLayerKind, any> = {
+  pos: null,
+  neg: null,
+  pos_line: null,
+  neg_line: null,
+};
+const _promptLayerCreated: Record<SeedLayerKind, boolean> = {
+  pos: false,
+  neg: false,
+  pos_line: false,
+  neg_line: false,
+};
+
+function resetPromptLayerCache() {
+  for (const kind of SEED_LAYER_KINDS) {
+    _promptSources[kind] = null;
+    _promptLayerCreated[kind] = false;
+  }
+}
+
+function getPromptAnnotationSource(viewer: any, kind: SeedLayerKind): any {
+  const spec = SEED_LAYERS[kind];
+  if (_promptSources[kind]) return _promptSources[kind];
   if (!viewer?.layerManager?.managedLayers) return null;
 
   // Look for existing layer (may have been created but source not yet ready)
   for (const managedLayer of viewer.layerManager.managedLayers) {
-    if (managedLayer.name === layerName) {
+    if (managedLayer.name === spec.name) {
       const source = managedLayer.layer?.localAnnotations;
       if (source) {
-        _promptSources[key] = source;
+        _promptSources[kind] = source;
         return source;
       }
       return null;
     }
   }
 
-  // Create new annotation layer only once per polarity
-  if (_promptLayerCreated[key]) return null;
-  _promptLayerCreated[key] = true;
+  // Create new annotation layer only once per kind
+  if (_promptLayerCreated[kind]) return null;
+  _promptLayerCreated[kind] = true;
 
   try {
     const layerSpec = viewer.layerSpecification;
     if (!layerSpec) return null;
 
-    const spec = { type: "annotation", annotationColor: color };
-    const managedLayer = makeLayer(layerSpec, layerName, spec);
+    const managedLayer = makeLayer(layerSpec, spec.name, {
+      type: "annotation",
+      shader: seedLayerShader(spec),
+    });
     layerSpec.add(managedLayer);
-    console.log(`[BUG-016] Created ${layerName} annotation layer (${color})`);
+    console.log(`[prompt] created ${spec.name} annotation layer`);
   } catch (e) {
-    console.warn(`[BUG-016] Failed to create ${layerName}:`, e);
-    _promptLayerCreated[key] = false;
+    console.warn(`[prompt] failed to create ${spec.name}:`, e);
+    _promptLayerCreated[kind] = false;
   }
   return null;
 }
 
-// [BUG-016] Build a Float32Array point in NG coordinate space order
-function makeAnnotationPoint(viewer: any, pt: StrokePoint): Float32Array {
-  const coordSpace = viewer?.coordinateSpace?.value;
-  const names = coordSpace?.names;
-  const ndim = names?.length ?? 3;
-  const arr = new Float32Array(ndim);
-  if (names) {
-    const ix = names.indexOf("x"), iy = names.indexOf("y"), iz = names.indexOf("z");
-    if (ix >= 0) arr[ix] = pt.x;
-    if (iy >= 0) arr[iy] = pt.y;
-    if (iz >= 0) arr[iz] = pt.z;
-  } else {
-    arr[0] = pt.x; arr[1] = pt.y; arr[2] = pt.z;
+// Add a finished prompt to its layer. The annotation source is created lazily
+// and is not ready on the very first prompt of a session, which is why the
+// point path already retried; the retry is shared here so a box or a scribble
+// drawn first is not the one that goes missing.
+function addPromptAnnotation(viewer: any, prompt: Prompt): void {
+  const annotations = promptAnnotations(viewer, prompt);
+  if (annotations.length === 0) return;
+
+  const put = (source: any) => {
+    for (const annotation of annotations) {
+      try {
+        source.add(annotation);
+      } catch (e) {
+        console.warn("[prompt] failed to add annotation:", e);
+      }
+    }
+  };
+
+  const kind = seedLayerKind(prompt);
+  const source = getPromptAnnotationSource(viewer, kind);
+  if (source) {
+    put(source);
+    return;
   }
-  return arr;
+  setTimeout(() => {
+    const retry = getPromptAnnotationSource(viewer, kind);
+    if (retry) put(retry);
+  }, 200);
 }
 
 function convertLength(value: number, fromUnit: string, toUnit: string): number {
@@ -545,68 +606,16 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
       if (isValidPoint(pt)) {
         const prompt: PromptPoint = { mode: "point", point: pt, polarity: promptPolarity };
 
-        // [BUG-016] Render seed as NG annotation (tracks with zoom/pan/Z scroll)
-        // instead of canvas overlay dot (fixed screen position).
-        // On first click, source may not be ready (async init). Try once,
-        // then retry after 100ms to catch the async initialization.
-        let source = getPromptAnnotationSource(viewer, promptPolarity);
-        if (!source) {
-          // Trigger layer creation and schedule a retry to add the annotation
-          setTimeout(() => {
-            const retrySource = getPromptAnnotationSource(viewer, promptPolarity);
-            if (retrySource) {
-              try {
-                retrySource.add({
-                  type: AnnotationType.POINT,
-                  id: makeAnnotationId(),
-                  point: makeAnnotationPoint(viewer, pt),
-                  description: `${promptPolarity} seed`,
-                  properties: [],
-                  relatedSegments: [],
-                });
-                // Clear the canvas fallback dot since annotation is now added
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-                if (lockedBBox) drawLockedRegionIndicator(ctx, canvas, viewer, lockedBBox);
-              } catch (e) {
-                // Fallback dot already drawn, ignore
-              }
-            }
-          }, 200);
-        }
-        if (source) {
-          try {
-            source.add({
-              type: AnnotationType.POINT,
-              id: makeAnnotationId(),
-              point: makeAnnotationPoint(viewer, pt),
-              description: `${promptPolarity} seed`,
-              properties: [],
-              relatedSegments: [],
-            });
-          } catch (e) {
-            console.warn("[BUG-016] Failed to add annotation, falling back to canvas:", e);
-            // Fallback: draw on canvas if annotation fails
-            ctx.globalCompositeOperation = "source-over";
-            ctx.fillStyle = drawingTool.strokeColor.value;
-            ctx.beginPath();
-            ctx.arc(cx, cy, 5, 0, Math.PI * 2);
-            ctx.fill();
-          }
-        } else {
-          // Fallback: no annotation layer available, use canvas
-          ctx.globalCompositeOperation = "source-over";
-          ctx.fillStyle = drawingTool.strokeColor.value;
-          ctx.beginPath();
-          ctx.arc(cx, cy, 5, 0, Math.PI * 2);
-          ctx.fill();
-        }
-
-        // [BUG-016] Original canvas-only rendering (commented out):
-        // ctx.globalCompositeOperation = "source-over";
-        // ctx.fillStyle = drawingTool.strokeColor.value;
-        // ctx.beginPath();
-        // ctx.arc(cx, cy, 5, 0, Math.PI * 2);
-        // ctx.fill();
+        // [BUG-016] The seed is an annotation, so the viewer positions it.
+        //
+        // There used to be a canvas fallback here that drew a dot at the click's
+        // SCREEN coordinates whenever the annotation layer was not ready yet --
+        // which it never is on the first click of a session. That dot then sat
+        // at fixed pixels for the rest of the session unless a later retry
+        // happened to clear the whole overlay, which is the same defect the
+        // boxes and scribbles had. addPromptAnnotation retries instead of
+        // drawing something wrong in the meantime.
+        addPromptAnnotation(viewer, prompt);
 
         promptData.push(prompt);
         finishCapture();
@@ -618,11 +627,18 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
       drawingTool.snapshot = ctx.getImageData(0, 0, canvas.width, canvas.height);
     } else if (promptMode === "scribble") {
       currentPrompt = { mode: "scribble", points: [], polarity: promptPolarity };
+      // Snapshot for the same reason bbox takes one: what is drawn during the
+      // drag is a screen-space preview, and the commit puts the canvas back to
+      // this before handing the prompt to the annotation layer. Restoring
+      // rather than clearing keeps anything else already on the overlay --
+      // uncommitted brush strokes, the locked-region indicator.
+      drawingTool.snapshot = ctx.getImageData(0, 0, canvas.width, canvas.height);
       ctx.beginPath();
       ctx.moveTo(cx, cy);
       if (isValidPoint(pt)) (currentPrompt as PromptScribble).points.push({ ...pt });
     } else if (promptMode === "lasso") {
       currentPrompt = { mode: "lasso", points: [], polarity: promptPolarity };
+      drawingTool.snapshot = ctx.getImageData(0, 0, canvas.width, canvas.height);
       ctx.beginPath();
       ctx.moveTo(cx, cy);
       if (isValidPoint(pt)) (currentPrompt as PromptLasso).points.push({ ...pt });
@@ -660,9 +676,21 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
         finishCapture();
       }
       if (currentPrompt) {
+        // The prompt leaves the overlay and becomes an annotation, so it
+        // follows the data instead of the screen. finishCapture drops the
+        // snapshot, so the preview has to be wiped before it is called.
+        const preview = drawingTool.snapshot;
+        if (preview) {
+          ctx.save();
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
+          ctx.putImageData(preview, 0, 0);
+          ctx.restore();
+        }
+        addPromptAnnotation(viewer, currentPrompt);
         promptData.push(currentPrompt);
         currentPrompt = null;
         finishCapture();
+        safeRedraw(viewer);
         window.parent.postMessage({ type: "prompt_complete", prompts: promptData }, "*");
       }
     };
@@ -883,11 +911,11 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
     }
     if (type === "prompt_clear") {
       // [BUG-016] Clear both NG annotation layers (positive + negative seed dots)
-      for (const pol of ["positive", "negative"] as const) {
-        const source = getPromptAnnotationSource(viewer, pol);
+      for (const kind of SEED_LAYER_KINDS) {
+        const source = getPromptAnnotationSource(viewer, kind);
         if (source) {
           try { source.clear(); } catch (e) {
-            console.warn("[BUG-016] Failed to clear annotations:", e);
+            console.warn("[prompt] failed to clear annotations:", e);
           }
         }
       }
@@ -897,10 +925,7 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       promptData.length = 0;
       // Reset cached annotation sources in case layers were removed
-      _promptSources.pos = null;
-      _promptSources.neg = null;
-      _promptLayerCreated.pos = false;
-      _promptLayerCreated.neg = false;
+      resetPromptLayerCache();
       // Redraw locked indicator if view is locked
       if (lockedBBox) {
         drawLockedRegionIndicator(ctx, canvas, viewer, lockedBBox);
@@ -911,44 +936,32 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
     if (type === "prompt_restore") {
       // [BUG-016] Restore seed dots from saved per-neuron data.
       // Clear existing dots first
-      for (const pol of ["positive", "negative"] as const) {
-        const source = getPromptAnnotationSource(viewer, pol);
+      for (const kind of SEED_LAYER_KINDS) {
+        const source = getPromptAnnotationSource(viewer, kind);
         if (source) {
           try { source.clear(); } catch {}
         }
       }
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       promptData.length = 0;
-      _promptSources.pos = null;
-      _promptSources.neg = null;
-      _promptLayerCreated.pos = false;
-      _promptLayerCreated.neg = false;
+      resetPromptLayerCache();
       if (lockedBBox) {
         drawLockedRegionIndicator(ctx, canvas, viewer, lockedBBox);
       }
 
-      // Re-add saved prompts as annotations
+      // Re-add saved prompts as annotations.
+      //
+      // This used to skip everything that was not a point, which quietly made
+      // a restore destructive: the panel sends the whole list on a neuron
+      // switch or an undo, and every box and scribble in it was dropped from
+      // promptData. The next prompt the user drew was then reported back to
+      // the panel on top of a list those prompts were no longer in.
       const restoredPrompts = event.data?.prompts || [];
       for (const p of restoredPrompts) {
-        if (p.type !== "point" || !p.data) continue;
-        const pol = p.polarity || "positive";
-        const pt = { x: p.data.x ?? 0, y: p.data.y ?? 0, z: p.data.z ?? 0 };
-        const prompt: PromptPoint = { mode: "point", point: pt, polarity: pol };
+        const prompt = promptFromPanel(p);
+        if (!prompt) continue;
         promptData.push(prompt);
-
-        const source = getPromptAnnotationSource(viewer, pol);
-        if (source) {
-          try {
-            source.add({
-              type: AnnotationType.POINT,
-              id: makeAnnotationId(),
-              point: makeAnnotationPoint(viewer, pt),
-              description: `${pol} seed`,
-              properties: [],
-              relatedSegments: [],
-            });
-          } catch {}
-        }
+        addPromptAnnotation(viewer, prompt);
       }
       safeRedraw(viewer);
       return;
