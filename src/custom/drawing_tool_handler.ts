@@ -241,6 +241,34 @@ function containerCoords(e: MouseEvent, container: HTMLElement) {
   return { x: e.clientX - r.left, y: e.clientY - r.top };
 }
 
+/**
+ * Put a drag preview's backing pixels back, if they still fit.
+ *
+ * putImageData writes raw backing pixels at (0, 0) and ignores the transform,
+ * so a snapshot taken before a mid-drag resize would be pasted into the corner
+ * of a canvas that is no longer that size -- everything on it displaced by the
+ * difference. A resize clears the canvas anyway (assigning width/height does),
+ * so when the sizes disagree there is nothing worth restoring and the honest
+ * move is to say so and let the caller redraw what belongs there.
+ *
+ * Returns whether the snapshot was used.
+ */
+function restorePreview(
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  snapshot: ImageData | null,
+): boolean {
+  if (!snapshot) return false;
+  if (snapshot.width !== canvas.width || snapshot.height !== canvas.height) {
+    return false;
+  }
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.putImageData(snapshot, 0, 0);
+  ctx.restore();
+  return true;
+}
+
 function safeRedraw(viewer: any) {
   viewer?.display?.scheduleRedraw?.();
 }
@@ -399,20 +427,54 @@ function convertLength(value: number, fromUnit: string, toUnit: string): number 
   return value * (from.lengthInNanometers / to.lengthInNanometers);
 }
 
-function calculatePhysicalSizePerPixel(viewer: any): number | null {
-  if (!viewer?.display?.panels) return null;
-  for (const panel of viewer.display.panels) {
-    const scaleBars = panel?.scaleBars?.scaleBars;
-    if (!scaleBars) continue;
-    for (const scaleBar of scaleBars) {
-      const dimensions = scaleBar?.dimensions;
-      if (dimensions?.physicalSizePerPixel) {
-        const baseUnit = dimensions.physicalBaseUnit ?? "m";
-        return convertLength(dimensions.physicalSizePerPixel, baseUnit, "µm");
-      }
-    }
+/**
+ * The authoritative display scales, straight from the navigation state.
+ *
+ * Both numbers below used to be gathered by hunting: physical-size-per-pixel by
+ * reading a scale-bar WIDGET's internals, and physical-size-per-voxel by walking
+ * panels and visible layers and taking whichever answered first. That last one
+ * has no defined answer when a scene carries two image layers at different
+ * resolutions -- it returns whichever the iteration reached first.
+ *
+ * There is one right source and it is global. sliceview/panel.ts:426-432 hands
+ * the scale bar exactly these: navigationState.displayDimensionRenderInfo and
+ * navigationState.zoomFactor. Reading the same inputs gives the same numbers
+ * the scale bar draws, without depending on the widget existing or on how many
+ * layers are visible.
+ */
+function displayScales(viewer: any): {
+  perVoxelUm: number[];
+  perPixelUm: number;
+} | null {
+  const nav = viewer?.navigationState;
+  const info = nav?.displayDimensionRenderInfo?.value;
+  const zoom = nav?.zoomFactor?.value;
+  const scales = info?.displayDimensionScales;
+  const units = info?.displayDimensionUnits;
+  const canonical = info?.canonicalVoxelFactors;
+  if (!scales || !units || !canonical || !isFinite(zoom)) return null;
+
+  const perVoxelUm: number[] = [];
+  for (let i = 0; i < scales.length; ++i) {
+    perVoxelUm.push(convertLength(scales[i], units[i] ?? "m", "\u00b5m"));
   }
-  return null;
+  if (perVoxelUm.length === 0) return null;
+
+  // Display dimension 0, which is what the scale-bar scrape effectively
+  // returned: it read the first bar, and the bars are built in display-dimension
+  // order (widget/scale_bar.ts:316-345). The formula is that file's own, at
+  // :341-343.
+  const perPixelUm = convertLength(
+    (scales[0] * zoom) / canonical[0],
+    units[0] ?? "m",
+    "\u00b5m",
+  );
+  if (!isFinite(perPixelUm) || perPixelUm <= 0) return null;
+  return { perVoxelUm, perPixelUm };
+}
+
+function calculatePhysicalSizePerPixel(viewer: any): number | null {
+  return displayScales(viewer)?.perPixelUm ?? null;
 }
 
 function getScaleBarPhysicalLength(viewer: any): number | null {
@@ -440,28 +502,56 @@ function sendScaleBarUpdate(viewer: any) {
 }
 
 function calculatePhysicalSizePerVoxel(viewer: any): number[] | null {
-  if (!viewer?.display?.panels) return null;
-  const preferredTypes = ["image", null];
-  for (const filterType of preferredTypes) {
-    for (const panel of viewer.display.panels) {
-      const sv = panel?.sliceView;
-      if (!sv) continue;
-      for (const managed of sv.visibleLayerList ?? []) {
-        if (filterType && managed?.userLayer?.type !== filterType) continue;
-        const info = sv.visibleLayers?.get?.(managed)?.displayDimensionRenderInfo;
-        const scales = info?.displayDimensionScales;
-        const units = info?.displayDimensionUnits;
-        if (!scales || !units) continue;
-        return Array.from(scales).map((v, i) =>
-          convertLength(v as number, (Array.from(units)[i] as string) ?? "m", "µm"),
-        );
-      }
-    }
-  }
-  return null;
+  return displayScales(viewer)?.perVoxelUm ?? null;
 }
 
 // ---------------------------------------------------------------------------
+
+/**
+ * Tell the parent which build of the viewer it is talking to.
+ *
+ * The viewer is a separate build from the panel, each site serves the bundle in
+ * its own checkout, and a deployed bundle can be months older than the panel
+ * driving it. Every symptom of that skew presents as "this feature does not
+ * work for some users", with no way to tell an old bundle from a real bug. Two
+ * identifiers make it a question anyone can answer in seconds:
+ *
+ *   commit  the source it was built from, injected at build time via the
+ *           existing `--define` option (build_tools/cli.ts:164). Absent unless
+ *           the build passes it, in which case this reports "unknown" rather
+ *           than pretending.
+ *   bundle  the content hash rspack put in the main script's filename. Always
+ *           available, needs no build change, and identifies the artifact that
+ *           is actually running rather than the commit someone meant to ship.
+ *
+ * Sent on startup and again whenever a plugin announces itself, because the
+ * panel mounts on its own schedule and a single startup message can be sent
+ * before anything is listening.
+ */
+declare const NEUROGLANCER_BUILD_COMMIT: string | undefined;
+
+function currentBundleName(): string {
+  const scripts = Array.from(document.getElementsByTagName("script"));
+  for (const script of scripts) {
+    const match = /\/?(main\.[0-9a-f]+\.js)$/.exec(script.src ?? "");
+    if (match) return match[1];
+  }
+  return "unknown";
+}
+
+function sendBuildInfo(parent: Window) {
+  parent.postMessage(
+    {
+      type: "viewer_build_info",
+      commit:
+        typeof NEUROGLANCER_BUILD_COMMIT === "string"
+          ? NEUROGLANCER_BUILD_COMMIT
+          : "unknown",
+      bundle: currentBundleName(),
+    },
+    "*",
+  );
+}
 
 export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
   const { canvas, ctx, viewer } = drawingTool;
@@ -498,7 +588,7 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
       if (isFinite(lastScreen.x)) ctx.lineTo(x, y); else ctx.moveTo(x, y);
       ctx.stroke();
     } else if (promptMode === "bbox") {
-      if (drawingTool.snapshot) ctx.putImageData(drawingTool.snapshot, 0, 0);
+      restorePreview(ctx, canvas, drawingTool.snapshot);
       ctx.globalCompositeOperation = "source-over";
       ctx.strokeStyle = drawingTool.strokeColor.value;
       ctx.lineWidth = 2;
@@ -669,12 +759,11 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
         // The prompt leaves the overlay and becomes an annotation, so it
         // follows the data instead of the screen. finishCapture drops the
         // snapshot, so the preview has to be wiped before it is called.
-        const preview = drawingTool.snapshot;
-        if (preview) {
-          ctx.save();
-          ctx.setTransform(1, 0, 0, 1, 0, 0);
-          ctx.putImageData(preview, 0, 0);
-          ctx.restore();
+        if (!restorePreview(ctx, canvas, drawingTool.snapshot)) {
+          // The snapshot no longer fits: the canvas was resized mid-drag and
+          // has already been cleared by that resize, so there is nothing to put
+          // back except the indicator that lives on it.
+          if (lockedBBox) drawLockedRegionIndicator(ctx, canvas, viewer, lockedBBox);
         }
         addPromptAnnotation(viewer, currentPrompt);
         promptData.push(currentPrompt);
@@ -803,6 +892,8 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
   });
 
   // -- Incoming messages from parent ----------------------------------------
+
+  sendBuildInfo(window.parent);
 
   window.addEventListener("message", (event) => {
     const { type, mode, size, color, polarity } = event.data ?? {};
@@ -1096,6 +1187,9 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
       return;
     }
     if (type === "plugin_activated") {
+      // A plugin has just started listening, so this is the first moment the
+      // startup announcement below could reliably have been heard.
+      sendBuildInfo(window.parent);
       activatePluginBindings(event.data.pluginId, event.data.shortcuts ?? []);
       return;
     }

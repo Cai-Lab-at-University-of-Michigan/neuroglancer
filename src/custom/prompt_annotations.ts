@@ -129,6 +129,13 @@ export function promptAnnotations(viewer: any, prompt: Prompt): any[] {
     ];
   }
 
+  if (prompt.mode !== "scribble" && prompt.mode !== "lasso") {
+    // Every mode is spelled out above, so a new one added to the Prompt union
+    // lands here and fails to compile. It used to fall into the path branch
+    // below and be drawn as whatever `points` it happened to carry.
+    return assertNeverPrompt(prompt);
+  }
+
   // A one-point scribble has no segment to draw, and a polyline holding a
   // single point serializes zero instances.
   const points = prompt.points.filter(isValidPoint);
@@ -173,5 +180,29 @@ export function promptFromPanel(p: any): Prompt | null {
     if (!Array.isArray(p.data.points)) return null;
     return { mode: p.type, points: p.data.points.map(point), polarity };
   }
+  // Dropped, but not quietly. The caller skips whatever this returns null for,
+  // so a prompt type the panel has learned to send and the viewer has not would
+  // otherwise vanish between two versions with nothing said anywhere -- which
+  // is how a restore silently lost every box for weeks.
+  warnUnknownPromptType(p.type);
   return null;
+}
+
+/** Named types already warned about, so a restore of N prompts says it once. */
+const warnedPromptTypes = new Set<string>();
+
+function warnUnknownPromptType(type: unknown) {
+  const name = typeof type === "string" ? type : String(type);
+  if (warnedPromptTypes.has(name)) return;
+  warnedPromptTypes.add(name);
+  console.warn(
+    `[prompt] ignoring a prompt of unknown type "${name}". This viewer bundle ` +
+      "is older than the panel talking to it, or the type was misspelled; " +
+      "either way the prompt is not drawn and not sent to the model.",
+  );
+}
+
+function assertNeverPrompt(prompt: never): never[] {
+  console.warn("[prompt] unhandled prompt mode:", prompt);
+  return [];
 }
