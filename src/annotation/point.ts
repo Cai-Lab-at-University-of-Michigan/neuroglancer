@@ -104,10 +104,7 @@ ${this.setPartIndex(builder)};
     "annotation/point:3d",
     (builder: ShaderBuilder) => {
       defineVertexId(builder);
-      // The old depth-based fade is replaced, not stacked on. It was scaled to
-      // the slice view's depth range rather than to the data, and it carried a
-      // floor that kept a point permanently visible however far away it was.
-      defineShapeShader(builder, /*crossSectionFade=*/ false);
+      defineShapeShader(builder);
       this.defineShaderCommon(builder);
       builder.addVertexMain(`
 // How far this point is from the slice on screen, and how visible that leaves

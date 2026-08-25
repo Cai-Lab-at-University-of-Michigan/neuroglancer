@@ -4,6 +4,10 @@ import { initViewportHandler } from "#src/custom/viewport_handler.js";
 import { ALLOWED_UNITS } from "#src/widget/scale_bar.js";
 // [BUG-016] Prompts are rendered as annotations rather than as canvas overlay
 // marks, so that the viewer positions them and they track zoom, pan and Z.
+import {
+  sliceFadeCurve,
+  sliceFadeSlices,
+} from "#src/annotation/slice_fade.js";
 import type {
   Prompt,
   PromptBBox,
@@ -1307,6 +1311,20 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
       return;
     }
     // -- Minimap handlers -----------------------------------------------------
+    // How far from its own slice an annotation stays visible, and how sharply
+    // it dims on the way there. The panel owns the controls; this is the whole
+    // of the viewer's side. See annotation/slice_fade.ts for what the two
+    // numbers mean and why they are separate.
+    if (type === "slice_fade_change") {
+      const { slices, curve } = event.data;
+      if (typeof slices === "number" && isFinite(slices) && slices > 0) {
+        sliceFadeSlices.value = slices;
+      }
+      if (typeof curve === "number" && isFinite(curve) && curve > 0) {
+        sliceFadeCurve.value = curve;
+      }
+      return;
+    }
     if (type === "minimap_toggle") {
       const minimap = getMinimap();
       if (minimap) {
