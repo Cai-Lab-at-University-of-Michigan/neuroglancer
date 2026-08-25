@@ -10,7 +10,7 @@
  * that is not stored x, y, z.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { AnnotationType } from "#src/annotation/index.js";
 import {
@@ -212,6 +212,27 @@ describe("promptFromPanel reads back every shape the panel sends", () => {
     });
     const [annotation] = promptAnnotations(XYZ, restored!);
     expect(annotation.points).toHaveLength(5);
+  });
+
+  it("says so when it drops a type it does not know", () => {
+    // The caller skips whatever this returns null for, so an unrecognised type
+    // would otherwise vanish between two versions with nothing said anywhere.
+    // That is not hypothetical: a restore silently lost every box for weeks
+    // because the handler skipped them without a word.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      expect(promptFromPanel({ type: "sphere", data: {} })).toBe(null);
+      expect(warn).toHaveBeenCalled();
+      expect(String(warn.mock.calls[0][0])).toContain("sphere");
+
+      // Once per type, not once per prompt: a restore replays the whole list.
+      const before = warn.mock.calls.length;
+      promptFromPanel({ type: "sphere", data: {} });
+      promptFromPanel({ type: "sphere", data: {} });
+      expect(warn.mock.calls.length).toBe(before);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("drops what it cannot read rather than guessing", () => {

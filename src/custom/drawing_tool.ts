@@ -25,6 +25,9 @@ export class DrawingTool extends RefCounted {
   snapshot: ImageData | null = null;
   private currentCursor = "";
   private cursorTimer: ReturnType<typeof setInterval> | null = null;
+  /** When the current tool was armed, so the log says how long it survived.
+   *  Null while no tool is armed, which is when re-application means nothing. */
+  private cursorArmedAt: number | null = null;
 
   constructor(public viewer: Viewer) {
     super();
@@ -96,16 +99,52 @@ export class DrawingTool extends RefCounted {
     }
 
     const wasActive = this.currentCursor !== "";
+    // Arming a different tool is not the cursor being lost. Both are a write of
+    // a new value over an old one, and only the poll's write means anything:
+    // the log exists to answer whether something clears the style behind our
+    // back, and annotation work is a stream of tool switches, so counting them
+    // would answer that question backwards.
+    const cursorChanged = this.currentCursor !== cursor;
     this.currentCursor = cursor;
+    if (cursorChanged) {
+      // The "armed for N ms" figure belongs to the tool now on screen.
+      this.cursorArmedAt = cursor ? performance.now() : null;
+    }
 
-    // Apply immediately
+    // Apply immediately. Not from the poll, so it does not report itself.
     this.enforceCursor();
 
     // Start or stop periodic enforcement.
-    // Neuroglancer's render loop can reset inline cursor styles between frames,
-    // so we re-apply every 100 ms while a drawing/prompt mode is active.
+    //
+    // ⚠️ THE STATED REASON BELOW IS WRONG, and the poll is instrumented rather
+    // than removed until there is data. The comment used to say Neuroglancer's
+    // render loop resets inline cursor styles between frames. It cannot:
+    // grepping the whole of src/ outside src/custom/ for a JavaScript cursor
+    // assignment returns zero hits, and native's only cursor is the CSS rule at
+    // src/rendered_data_panel.css:18.
+    //
+    // What does happen is that panels are REBUILT, not restyled:
+    // data_panel_layout.ts:966-967 has updateLayout() call disposeLayout() and
+    // then construct fresh SliceViewPanels (:372, :475, :573, :614). A new
+    // element carries no inline style, which would explain both the symptom and
+    // why a 100 ms poll appears to cure it -- but that is read, not measured.
+    //
+    // HOW TO READ THE LOG THIS NOW EMITS: open the console with a drawing or
+    // prompt tool armed and watch for "[cursor] re-applied". Each line is a
+    // moment the poll found the cursor gone and put it back, with how long the
+    // tool had been armed.
+    //   - lines ONLY right after a layout change (split a panel, toggle the 3D
+    //     view, resize the window, add or remove a layer): the panel-rebuild
+    //     explanation holds, and the poll should be replaced by re-applying on
+    //     the layout signal this codebase already subscribes to
+    //     (drawing_tool_handler.ts:1448, :1501).
+    //   - lines arriving steadily while nothing is touched: something really is
+    //     clearing the style and the poll stays until it is found.
+    //   - no lines at all across a session of real use: nothing is clearing it
+    //     and all 31 lines of this mechanism can go.
+    // Deleting it before that data exists would be guessing twice over.
     if (cursor && !wasActive) {
-      this.cursorTimer = setInterval(() => this.enforceCursor(), 100);
+      this.cursorTimer = setInterval(() => this.enforceCursor(true), 100);
     } else if (!cursor && wasActive) {
       if (this.cursorTimer !== null) {
         clearInterval(this.cursorTimer);
@@ -114,11 +153,21 @@ export class DrawingTool extends RefCounted {
     }
   }
 
-  private enforceCursor() {
+  private enforceCursor(fromPoll = false) {
     const container = this.viewer.display.container as HTMLElement;
     const panels = container.querySelectorAll<HTMLElement>(PANEL_SELECTOR);
     if (this.currentCursor) {
       const v = this.currentCursor;
+      // Only a re-application is worth recording: the poll runs ten times a
+      // second and all but a handful of those find the cursor already correct.
+      // Reading the container's own inline value is what tells the two apart.
+      if (fromPoll && this.cursorArmedAt !== null && container.style.cursor !== v) {
+        const heldMs = Math.round(performance.now() - this.cursorArmedAt);
+        console.log(
+          `[cursor] re-applied after ${heldMs} ms armed (was ` +
+            `"${container.style.cursor || "<none>"}")`,
+        );
+      }
       container.style.setProperty("cursor", v, "important");
       panels.forEach(p => p.style.setProperty("cursor", v, "important"));
     } else {
