@@ -99,9 +99,19 @@ export class DrawingTool extends RefCounted {
     }
 
     const wasActive = this.currentCursor !== "";
+    // Arming a different tool is not the cursor being lost. Both are a write of
+    // a new value over an old one, and only the poll's write means anything:
+    // the log exists to answer whether something clears the style behind our
+    // back, and annotation work is a stream of tool switches, so counting them
+    // would answer that question backwards.
+    const cursorChanged = this.currentCursor !== cursor;
     this.currentCursor = cursor;
+    if (cursorChanged) {
+      // The "armed for N ms" figure belongs to the tool now on screen.
+      this.cursorArmedAt = cursor ? performance.now() : null;
+    }
 
-    // Apply immediately
+    // Apply immediately. Not from the poll, so it does not report itself.
     this.enforceCursor();
 
     // Start or stop periodic enforcement.
@@ -134,10 +144,8 @@ export class DrawingTool extends RefCounted {
     //     and all 31 lines of this mechanism can go.
     // Deleting it before that data exists would be guessing twice over.
     if (cursor && !wasActive) {
-      this.cursorArmedAt = performance.now();
-      this.cursorTimer = setInterval(() => this.enforceCursor(), 100);
+      this.cursorTimer = setInterval(() => this.enforceCursor(true), 100);
     } else if (!cursor && wasActive) {
-      this.cursorArmedAt = null;
       if (this.cursorTimer !== null) {
         clearInterval(this.cursorTimer);
         this.cursorTimer = null;
@@ -145,7 +153,7 @@ export class DrawingTool extends RefCounted {
     }
   }
 
-  private enforceCursor() {
+  private enforceCursor(fromPoll = false) {
     const container = this.viewer.display.container as HTMLElement;
     const panels = container.querySelectorAll<HTMLElement>(PANEL_SELECTOR);
     if (this.currentCursor) {
@@ -153,7 +161,7 @@ export class DrawingTool extends RefCounted {
       // Only a re-application is worth recording: the poll runs ten times a
       // second and all but a handful of those find the cursor already correct.
       // Reading the container's own inline value is what tells the two apart.
-      if (this.cursorArmedAt !== null && container.style.cursor !== v) {
+      if (fromPoll && this.cursorArmedAt !== null && container.style.cursor !== v) {
         const heldMs = Math.round(performance.now() - this.cursorArmedAt);
         console.log(
           `[cursor] re-applied after ${heldMs} ms armed (was ` +
