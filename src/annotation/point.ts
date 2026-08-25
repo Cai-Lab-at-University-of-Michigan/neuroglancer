@@ -104,9 +104,28 @@ ${this.setPartIndex(builder)};
     "annotation/point:3d",
     (builder: ShaderBuilder) => {
       defineVertexId(builder);
-      defineShapeShader(builder, /*crossSectionFade=*/ this.targetIsSliceView);
+      // The old depth-based fade is replaced, not stacked on. It was scaled to
+      // the slice view's depth range rather than to the data, and it carried a
+      // floor that kept a point permanently visible however far away it was.
+      defineShapeShader(builder, /*crossSectionFade=*/ false);
       this.defineShaderCommon(builder);
       builder.addVertexMain(`
+// How far this point is from the slice on screen, and how visible that leaves
+// it. A point has no extent, so one value decides the whole thing and the
+// vertex stage is the right place: the existing cull below runs before
+// setPartIndex, so a point beyond the range writes no pick ID either and
+// cannot be hovered or selected. Lines cannot do this -- a segment can have
+// both ends outside the range and still cross it -- so they discard per
+// fragment instead. The mechanisms differ on purpose; what has to match is
+// that nothing beyond the range is drawn or picked.
+float ng_sliceFade = ${this.getSliceFadeFactor(
+        "getSliceSignedOutOfPlaneDistance(modelPosition)",
+      )};
+if (ng_sliceFade <= 0.0) {
+  gl_Position = vec4(2.0, 0.0, 0.0, 1.0);
+  return;
+}
+
 // Project point to clip space
 vec3 worldPos = projectModelVectorToSubspace(modelPosition);
 vec4 clipPos = uModelViewProjection * vec4(worldPos, 1.0);
@@ -119,6 +138,13 @@ zoomScale = clamp(zoomScale, 0.5, 3.0);
 
 float effectiveDiameter = ng_markerVoxelSize * zoomScale;
 effectiveDiameter = clamp(effectiveDiameter, 0.5, 100.0);
+
+// A point may shrink with distance -- napari does the same. A box or a lasso
+// must not: its geometry is the region the user handed the model, and
+// shrinking it would misreport the data. Those thin their outline instead.
+effectiveDiameter *= ng_sliceFade;
+vColor.a *= ng_sliceFade;
+vBorderColor.a *= ng_sliceFade;
 
 emitShape(clipPos, effectiveDiameter, ng_markerBorderWidth, ng_markerShape);
 `);
@@ -177,6 +203,14 @@ effectiveDiameter2d = clamp(effectiveDiameter2d, 0.5, 100.0);
 
 emitLine(uModelViewProjection, subspacePositionA, subspacePositionB, effectiveDiameter2d, ng_markerBorderWidth);
 `);
+        // ⚠️ Deliberately NOT slice-faded, and this is a no-op rather than an
+        // oversight. This path is reached when the layer has fewer than three
+        // display dimensions, and there renderSubspaceTransform never writes
+        // the third subspace slot while displaySubspaceModelMatrix keeps the
+        // identity's 1 in that column -- so the out-of-plane component is
+        // structurally zero, the distance is always zero, and the fade would be
+        // a silent permanent 1.0. Leaving the old depth fade here is honest;
+        // adding the new one would only look like it worked.
         builder.setFragmentMain(`
 vec4 color = getRoundedLineColor(vColor, vBorderColor);
 emitAnnotation(vec4(color.rgb, color.a * ${this.getCrossSectionFadeFactor()}));
@@ -224,11 +258,9 @@ emitAnnotation(vec4(color.rgb, color.a * ${this.getCrossSectionFadeFactor()}));
       case 3:
         this.enable(this.shaderGetter3d, context, (shader) => {
           const { gl } = shader;
-          initializeShapeShader(
-            shader,
-            projectionParameters,
-            { featherWidthInPixels: 1 },
-          );
+          initializeShapeShader(shader, projectionParameters, {
+            featherWidthInPixels: 1,
+          });
           drawShapes(gl, 1, context.count);
         });
         break;
