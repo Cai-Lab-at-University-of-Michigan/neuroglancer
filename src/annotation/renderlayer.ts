@@ -19,6 +19,7 @@ import "#src/annotation/line.js";
 import "#src/annotation/point.js";
 import "#src/annotation/ellipsoid.js";
 import "#src/annotation/polyline.js";
+import { sliceFadeCurve, sliceFadeSlices } from "#src/annotation/slice_fade.js";
 
 import type {
   AnnotationLayerState,
@@ -353,6 +354,17 @@ export class AnnotationLayer extends RefCounted {
     );
     this.registerDisposer(
       this.transform.changed.add(this.redrawNeeded.dispatch),
+    );
+    // Without these two, dragging the slice-fade controls changes the uniforms
+    // only on the next repaint something else happens to cause, which from the
+    // user's side reads as the controls not working. Nothing above subscribes
+    // to them because until now nothing outside displayState could change how
+    // an annotation is drawn.
+    this.registerDisposer(
+      sliceFadeSlices.changed.add(this.redrawNeeded.dispatch),
+    );
+    this.registerDisposer(
+      sliceFadeCurve.changed.add(this.redrawNeeded.dispatch),
     );
   }
 
