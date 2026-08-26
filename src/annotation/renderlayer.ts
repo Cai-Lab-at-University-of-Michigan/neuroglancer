@@ -342,6 +342,15 @@ export class AnnotationLayer extends RefCounted {
     this.registerDisposer(
       displayState.color.changed.add(this.redrawNeeded.dispatch),
     );
+    // Without these two, turning the fade on for a layer changes the uniforms
+    // only on the next repaint something else happens to cause, which from the
+    // user's side is indistinguishable from nothing happening.
+    this.registerDisposer(
+      displayState.sliceFadeSlices.changed.add(this.redrawNeeded.dispatch),
+    );
+    this.registerDisposer(
+      displayState.sliceFadeCurve.changed.add(this.redrawNeeded.dispatch),
+    );
     this.registerDisposer(
       displayState.shader.changed.add(this.redrawNeeded.dispatch),
     );

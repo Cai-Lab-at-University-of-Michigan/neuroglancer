@@ -104,7 +104,7 @@ ${this.setPartIndex(builder)};
     "annotation/point:3d",
     (builder: ShaderBuilder) => {
       defineVertexId(builder);
-      defineShapeShader(builder);
+      defineShapeShader(builder, /*crossSectionFade=*/ this.targetIsSliceView);
       this.defineShaderCommon(builder);
       builder.addVertexMain(`
 // How far this point is from the slice on screen, and how visible that leaves

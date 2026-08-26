@@ -1,3 +1,7 @@
+import {
+  sliceFadeCurve,
+  sliceFadeSlices,
+} from "#src/annotation/slice_fade.js";
 import type { DrawingTool } from "#src/custom/drawing_tool.js";
 import { initMinimap, getMinimap } from "#src/custom/minimap.js";
 import { initViewportHandler } from "#src/custom/viewport_handler.js";
@@ -349,6 +353,44 @@ function resetPromptLayerCache() {
   for (const kind of SEED_LAYER_KINDS) {
     _promptSources[kind] = null;
     _promptLayerCreated[kind] = false;
+  }
+}
+
+/**
+ * Turn the slice fade on for the four prompt layers, and for nothing else.
+ *
+ * The fade is off for every annotation layer by default (AnnotationDisplayState
+ * in annotation/annotation_layer_state.ts), so this function is the only thing
+ * that enables it anywhere in the viewer. That is deliberate: a spot-detection
+ * point cloud is an annotation layer too, and culling one a few slices from the
+ * current slice would take a working feature away from the people using it.
+ *
+ * ⚠️ Driven by layersChanged rather than by prompt traffic. Arming it inside
+ * getPromptAnnotationSource looked equivalent and is not: that function is only
+ * reached when the panel draws, clears or restores a prompt, so a saved scene
+ * reopened with prompt layers already in it and never touched would render them
+ * unfaded for the whole session -- the exact bug this fade exists to fix,
+ * silently unfixed in the one case nobody would think to test.
+ *
+ * Idempotent, and matching on the same exact name the layer was created with
+ * rather than on any guess about what a prompt layer looks like.
+ */
+function armPromptLayerFade(viewer: any): void {
+  const layers = viewer?.layerManager?.managedLayers;
+  if (!layers) return;
+  for (const managedLayer of layers) {
+    const spec = SEED_LAYER_KINDS.some(
+      (kind) => SEED_LAYERS[kind].name === managedLayer.name,
+    );
+    if (!spec) continue;
+    const displayState = managedLayer.layer?.annotationDisplayState;
+    if (!displayState) continue;
+    if (displayState.sliceFadeSlices.value !== sliceFadeSlices) {
+      displayState.sliceFadeSlices.value = sliceFadeSlices;
+    }
+    if (displayState.sliceFadeCurve.value !== sliceFadeCurve) {
+      displayState.sliceFadeCurve.value = sliceFadeCurve;
+    }
   }
 }
 
@@ -1451,6 +1493,15 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
   // Re-check when layers change
   viewer?.layerManager?.layersChanged?.add?.(() => {
     setTimeout(() => { sendColorHashSeed(); sendSegmentHoverState(); }, 100);
+  });
+
+  // Prompt layers can appear three ways: we create them, a saved scene restores
+  // them, or they are recreated after a clear. layersChanged is the one signal
+  // all three pass through. The immediate call covers layers that already exist
+  // by the time this handler is installed.
+  armPromptLayerFade(viewer);
+  viewer?.layerManager?.layersChanged?.add?.(() => {
+    armPromptLayerFade(viewer);
   });
 
   // -- Resize observer for locked region indicator --------------------------

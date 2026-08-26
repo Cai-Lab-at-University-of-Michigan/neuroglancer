@@ -25,7 +25,6 @@ import {
   propertyTypeDataType,
 } from "#src/annotation/index.js";
 import type { AnnotationLayer } from "#src/annotation/renderlayer.js";
-import { sliceFadeCurve, sliceFadeSlices } from "#src/annotation/slice_fade.js";
 import type { PerspectiveViewRenderContext } from "#src/perspective_view/render_layer.js";
 import type { ChunkDisplayTransformParameters } from "#src/render_coordinate_transform.js";
 import type { SliceViewPanelRenderContext } from "#src/sliceview/renderlayer.js";
@@ -64,6 +63,23 @@ export type AnnotationShaderGetter = ParameterizedContextDependentShaderGetter<
   ShaderModule,
   ShaderControlsBuilderState
 >;
+
+/**
+ * Clamp a slice-fade uniform into a range the shader can express.
+ *
+ * `Math.max` alone will not do it: it returns NaN for a NaN input, and a NaN
+ * uniform makes every fragment in the layer NaN with no error reported
+ * anywhere.
+ */
+function clampSliceFade(
+  value: number,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, value));
+}
 
 export interface AnnotationRenderContext {
   buffer: GLBuffer;
@@ -669,9 +685,18 @@ if (ng_discardValue) {
    */
   getSliceFadeFactor(signedDistanceExpr: string) {
     if (!this.targetIsSliceView) return "(1.0)";
+    // uSliceFadeSlices <= 0 is a layer that has not opted in, and it is the
+    // common case: prompts fade, everything else does not. The branch is on a
+    // uniform, so every invocation in a draw takes the same side of it and
+    // there is no divergence to pay for. It also guards the division, which
+    // would otherwise be by zero for exactly those layers.
+    //
+    // Parenthesised as a whole because callers use it inside a larger
+    // expression (`ng_LineWidth *= ...` in line.ts and polyline.ts).
     return (
+      "(uSliceFadeSlices <= 0.0 ? 1.0 : " +
       `pow(clamp(1.0 - abs(${signedDistanceExpr}) / uSliceFadeSlices, 0.0, 1.0),` +
-      " uSliceFadeCurve)"
+      " uSliceFadeCurve))"
     );
   }
 
@@ -701,8 +726,25 @@ if (ng_discardValue) {
     );
     gl.uniform3fv(shader.uniform("uSubspaceMatrix"), context.subspaceMatrix);
     gl.uniform1fv(shader.uniform("uModelClipBounds"), context.modelClipBounds);
-    gl.uniform1f(shader.uniform("uSliceFadeSlices"), sliceFadeSlices);
-    gl.uniform1f(shader.uniform("uSliceFadeCurve"), sliceFadeCurve);
+    // Per layer, not global: a layer that has not opted in sends 0, which the
+    // shader reads as "no fade" and leaves untouched. annotationLayer is
+    // destructured above and is non-optional on AnnotationRenderContext.
+    //
+    // Bounded here rather than trusted, because this is where every value
+    // arrives however it was set. The two failure modes are not symmetric: a
+    // silly `slices` only makes the fade a no-op, but `curve <= 0` breaks the
+    // cull -- pow(0, negative) is +inf so nothing is ever culled, and pow(0, 0)
+    // is undefined in the GLSL ES spec at exactly the cut-off distance, which
+    // would make the boundary depend on the driver.
+    const { displayState } = annotationLayer.state;
+    gl.uniform1f(
+      shader.uniform("uSliceFadeSlices"),
+      clampSliceFade(displayState.sliceFadeSlices.value, 0, 0, 1e6),
+    );
+    gl.uniform1f(
+      shader.uniform("uSliceFadeCurve"),
+      clampSliceFade(displayState.sliceFadeCurve.value, 1, 0.01, 100),
+    );
     gl.uniformMatrix4fv(
       shader.uniform("uModelViewProjection"),
       false,

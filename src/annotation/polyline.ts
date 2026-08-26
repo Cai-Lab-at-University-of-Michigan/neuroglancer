@@ -177,7 +177,7 @@ class RenderHelper extends AnnotationRenderHelper {
   if (ng_sliceFade <= 0.0) discard;
   float clipCoefficient = getSubspaceClipCoefficient(vModelPosition);
   emitAnnotation(vec4(vColor.rgb, vColor.a * getLineAlpha() *
-                                  ng_sliceFade *
+                                  ng_sliceFade * ${this.getCrossSectionFadeFactor()} *
                                   clipCoefficient));
   `);
     },
@@ -191,7 +191,7 @@ class RenderHelper extends AnnotationRenderHelper {
       // Replaced by the slice fade below, not stacked on it. The old fade here
       // is the one variant that was never clamped, so an endpoint marker could
       // brighten rather than dim as it went out of range.
-      defineCircleShader(builder, /*crossSectionFade=*/ false);
+      defineCircleShader(builder, /*crossSectionFade=*/ this.targetIsSliceView);
       builder.addVarying("highp float", "vClipCoefficient");
       builder.addVarying("highp vec4", "vBorderColor");
       defineNoOpLineSetters(builder);

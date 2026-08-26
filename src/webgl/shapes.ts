@@ -40,23 +40,10 @@ import type { ShaderBuilder, ShaderProgram } from "#src/webgl/shader.js";
 
 export const VERTICES_PER_SHAPE = VERTICES_PER_QUAD;
 
-/**
- * The depth-based cross-section fade this used to offer is gone, along with its
- * floor.
- *
- * The floor -- `max(fade, 0.15)`, commented "Keep at least 15% visibility" and
- * "prevent complete disappearance" -- was added deliberately in March 2026, so
- * removing it overturns a decision rather than fixing a bug. It is removed
- * because it is the specific reason a point could never disappear however far
- * from its slice it was, and a prompt that is still visible everywhere says the
- * model was given something it was not.
- *
- * What replaced it fades by distance to the slice measured in the data, not by
- * depth-buffer value: annotation/slice_fade.ts and getSliceFadeFactor in
- * annotation/type_handler.ts. Points apply it in the vertex stage and cull
- * beyond the range.
- */
-export function defineShapeShader(builder: ShaderBuilder) {
+export function defineShapeShader(
+  builder: ShaderBuilder,
+  crossSectionFade: boolean,
+) {
   builder.addVertexCode(glsl_getQuadVertexPosition);
   // x and y components: The x and y radii of the point in normalized device coordinates.
   // z component: Starting point of border from [0, 1].
@@ -87,11 +74,21 @@ void emitShape(vec4 position, float diameter, float borderWidth, float shapeType
 }
 `);
 
-  builder.addFragmentCode(`
+  if (crossSectionFade) {
+    builder.addFragmentCode(`
+float getShapeAlphaMultiplier() {
+  // Fade based on depth, but with a minimum floor to prevent complete disappearance
+  float fade = 1.0 - 2.0 * abs(0.5 - gl_FragCoord.z);
+  return max(fade, 0.15);  // Keep at least 15% visibility
+}
+`);
+  } else {
+    builder.addFragmentCode(`
 float getShapeAlphaMultiplier() {
   return 1.0;
 }
 `);
+  }
 
   // Shape distance field functions
   builder.addFragmentCode(`

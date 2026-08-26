@@ -1,5 +1,5 @@
 /**
- * How far from its own slice an annotation stays visible.
+ * How far from its own slice a PROMPT stays visible.
  *
  * An annotation is drawn on one slice. Neuroglancer's own cross-section fade is
  * scaled to the slice view's depth range rather than to the data, which is deep
@@ -21,24 +21,29 @@
  *            distinction. 1 is linear, 2 dims a neighbour to 64% where linear
  *            leaves it at 80%.
  *
- * ⚠️ These are deliberately global rather than per layer: one behaviour, one
- * number, decided 2026-08-25.
+ * ⚠️ THESE ARE THE PROMPT LAYERS' VALUES, NOT A GLOBAL SETTING. The fade is off
+ * for every annotation layer unless that layer opts in, and the only thing that
+ * opts anything in is getPromptAnnotationSource in custom/drawing_tool_handler.ts.
+ * The live value is per layer, on AnnotationDisplayState
+ * (annotation/annotation_layer_state.ts); these two constants are just what the
+ * prompt layers are set to.
  *
- * ⚠️ They are also FIXED, with nothing able to change them at runtime. A pair of
- * panel controls existed while these values were being chosen and was removed
- * once they were: the numbers below are what that tuning settled on, so the
- * control had done its job. Both remain uniforms rather than GLSL literals
- * because that is the seam a future per-scene or per-layer value would use --
- * source them from AnnotationDisplayState (annotation_layer_state.ts already
- * holds per-layer WatchableValues) and neither the shader nor the upload
- * changes.
+ * That distinction is the whole of finding F1 in the 2026-08-25 review, and it
+ * is not hypothetical: SAVAII generates spot-detection point clouds as
+ * annotation layers (backend/app/plugins/ng/settings/state_gen.py, "Generate an
+ * annotation layer configuration for pointclouds"), so a global fade would have
+ * culled a researcher's whole point cloud a few slices from the current one,
+ * with nothing on screen to say why and no control to turn it back. Making it
+ * per layer means we never have to decide whether that would have been an
+ * improvement -- we simply do not touch it.
  *
- * ⚠️ IF YOU MAKE THESE SETTABLE AGAIN, SUBSCRIBE TO THEM. A value that can
- * change but that AnnotationLayer does not listen to repaints only when
- * something else happens to trigger a frame, which from the user's side is
- * indistinguishable from the control being dead. That subscription lived in
- * renderlayer.ts and went with the controls; putting the setter back without it
- * is the trap this paragraph exists to prevent.
+ * ⚠️ There is no runtime control. A pair of panel controls existed while these
+ * values were being chosen and was removed once they were. IF YOU MAKE THEM
+ * SETTABLE AGAIN, the per-layer WatchableValues are already subscribed to
+ * redrawNeeded in renderlayer.ts, so a setter is all that is missing -- but
+ * check that subscription is still there, because a value that can change while
+ * nothing listens repaints only when something else happens to cause a frame,
+ * which looks exactly like a dead control.
  */
 
 /**
@@ -59,6 +64,25 @@
  * slices. Nobody had scrolled that far, which is why "it shows on every layer"
  * and "the slab is finite" were both true at once. This pulls the cut-off in to
  * `slices` and turns it into a gradient.
+ *
+ * ⚠️ ANISOTROPY PLUS AN OBLIQUE CROSS-SECTION READS SHORT, and this note exists
+ * so nobody has to rediscover it from a confusing screen. The distance is
+ * measured along the view normal, and the voxel factors cancel exactly only
+ * when the cross-section is axis-aligned. Rotate it and one slice step reads as
+ *
+ *     (sin^2 t + A cos^2 t) / sqrt(sin^2 t + A^2 cos^2 t)
+ *
+ * for anisotropy A in z and rotation t. That is at most 1 and never more, so
+ * the error is always in the direction of surviving too far rather than being
+ * cut off early. The worst case is 2*sqrt(A)/(1+A) at t = atan(sqrt(A)): 0.866
+ * at A = 3, and 0.629 at A = 8. Pinned in slice_fade.spec.ts.
+ *
+ * A sheared layer transform does the same thing with no rotation at all, so
+ * "anisotropy plus rotation" is the common case rather than the only one.
+ *
+ * None of this is reachable from SAVAII today -- the embedded viewer offers no
+ * way to rotate a cross-section, which is why browser check 13 could not be run
+ * on 2026-08-25. No defensive code, on purpose.
  */
 export const sliceFadeSlices = 5;
 

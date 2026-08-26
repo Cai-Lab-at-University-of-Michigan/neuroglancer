@@ -160,6 +160,23 @@ export class AnnotationDisplayState extends RefCounted {
   );
   ignoreNullSegmentFilter = new TrackableBoolean(true);
   disablePicking = new WatchableValue(false);
+  /**
+   * How far from its own slice an annotation in THIS layer stays visible, and
+   * how sharply it dims on the way there. See annotation/slice_fade.ts.
+   *
+   * ⚠️ `sliceFadeSlices = 0` means OFF, and off is the default, because most
+   * annotation layers are not prompts. A spot-detection point cloud is an
+   * annotation layer too, and culling it a few slices from the current one
+   * would silently take a working feature away from the people using it. Only
+   * a layer that opts in fades; everything else renders exactly as it did
+   * before the fade existed.
+   *
+   * Do not read `0` here as "the same test as `ng_sliceFade <= 0.0` in the
+   * shader". That one means this annotation is beyond the range and must not be
+   * drawn. This one means the layer has no range at all.
+   */
+  sliceFadeSlices = new WatchableValue<number>(0);
+  sliceFadeCurve = new WatchableValue<number>(1);
   displayUnfiltered = makeCachedLazyDerivedWatchableValue(
     (map, ignoreNullSegmentFilter) => {
       for (const state of map.values()) {
