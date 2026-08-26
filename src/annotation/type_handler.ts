@@ -25,6 +25,7 @@ import {
   propertyTypeDataType,
 } from "#src/annotation/index.js";
 import type { AnnotationLayer } from "#src/annotation/renderlayer.js";
+import { sliceFadeFactorGlsl } from "#src/annotation/slice_fade.js";
 import type { PerspectiveViewRenderContext } from "#src/perspective_view/render_layer.js";
 import type { ChunkDisplayTransformParameters } from "#src/render_coordinate_transform.js";
 import type { SliceViewPanelRenderContext } from "#src/sliceview/renderlayer.js";
@@ -436,13 +437,13 @@ vec3 projectModelVectorToSubspace(float modelPoint[${this.rank}]) {
   return result;
 }
 `;
-        // Both stages, unlike before: points need it in the vertex shader,
-        // lines and polylines need it per fragment. Its sibling
-        // getSubspaceClipCoefficient above is added to both for the same
-        // reason, and leaving this one vertex-only is why a fragment-side
-        // caller would not compile.
+        // Vertex only. An earlier revision added a fragment copy too, with a
+        // comment claiming lines and polylines needed it per fragment; they do
+        // not. What they need per fragment is getSliceSignedOutOfPlaneDistance
+        // below, which reads uSubspaceMatrix itself and calls nothing here.
+        // Every call site is in vertex code (point, line, polyline,
+        // bounding_box, ellipsoid), so the fragment copy was dead.
         builder.addVertexCode(glsl_projectModelVectorToSubspace);
-        builder.addFragmentCode(glsl_projectModelVectorToSubspace);
 
         const glsl_getSliceSignedOutOfPlaneDistance = `
 float getSliceSignedOutOfPlaneDistance(float modelPoint[${this.rank}]) {
@@ -691,13 +692,7 @@ if (ng_discardValue) {
     // there is no divergence to pay for. It also guards the division, which
     // would otherwise be by zero for exactly those layers.
     //
-    // Parenthesised as a whole because callers use it inside a larger
-    // expression (`ng_LineWidth *= ...` in line.ts and polyline.ts).
-    return (
-      "(uSliceFadeSlices <= 0.0 ? 1.0 : " +
-      `pow(clamp(1.0 - abs(${signedDistanceExpr}) / uSliceFadeSlices, 0.0, 1.0),` +
-      " uSliceFadeCurve))"
-    );
+    return sliceFadeFactorGlsl(signedDistanceExpr);
   }
 
   getCrossSectionFadeFactor() {

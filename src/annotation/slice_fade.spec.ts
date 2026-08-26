@@ -36,6 +36,7 @@
 import { describe, expect, it } from "vitest";
 import {
   sliceFadeCurve,
+  sliceFadeFactorGlsl,
   sliceFadeSlices,
 } from "#src/annotation/slice_fade.js";
 
@@ -49,6 +50,49 @@ function fadeModel(distance: number, slices: number, curve: number): number {
   if (slices <= 0) return 1;
   const t = Math.min(1, Math.max(0, 1 - Math.abs(distance) / slices));
   return t ** curve;
+}
+
+describe("the GLSL itself, pinned character for character", () => {
+  // ⚠️ THIS IS THE ONE ASSERTION IN THE FILE THAT READS PRODUCTION CODE.
+  // Everything else models the shader; this is the shader.
+  //
+  // It is a golden string on purpose, and the brittleness is the feature. Turn
+  // the `<=` into a `<` and an opted-out layer divides by zero: abs(d)/0.0 is
+  // +inf, 1.0 - inf is -inf, the clamp takes it to 0, and EVERY layer that has
+  // not opted in vanishes -- point clouds included. That is finding F1 coming
+  // back through one character, and before this test nothing would have caught
+  // it. If you are here because a reformat broke it, re-read the string and
+  // update it; if you are here because the logic changed, stop.
+  it("emits exactly the expected expression", () => {
+    expect(sliceFadeFactorGlsl("D")).toBe(
+      "(uSliceFadeSlices <= 0.0 ? 1.0 : " +
+        "pow(clamp(1.0 - abs(D) / uSliceFadeSlices, 0.0, 1.0), uSliceFadeCurve))",
+    );
+  });
+
+  it("substitutes the caller's distance expression verbatim", () => {
+    expect(
+      sliceFadeFactorGlsl("getSliceSignedOutOfPlaneDistance(p)"),
+    ).toContain("abs(getSliceSignedOutOfPlaneDistance(p))");
+  });
+
+  it("is parenthesised as a whole, so `x *= expr` is valid GLSL", () => {
+    // line.ts and polyline.ts both use it as `ng_LineWidth *= ...`.
+    const glsl = sliceFadeFactorGlsl("D");
+    expect(glsl.startsWith("(")).toBe(true);
+    expect(glsl.endsWith(")")).toBe(true);
+  });
+
+  it("guards the division rather than relying on the caller", () => {
+    // The specific character. Named so a search for it lands here.
+    expect(glslGuard(sliceFadeFactorGlsl("D"))).toBe("<=");
+  });
+});
+
+/** The comparison operator in the opt-out guard, or "" if the guard is gone. */
+function glslGuard(glsl: string): string {
+  const m = glsl.match(/uSliceFadeSlices\s*(<=|<|>=|>|===?)\s*0\.0/);
+  return m ? m[1] : "";
 }
 
 describe("the opt-out is the default, and it is exact", () => {

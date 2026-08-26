@@ -23,7 +23,9 @@
  *
  * ⚠️ THESE ARE THE PROMPT LAYERS' VALUES, NOT A GLOBAL SETTING. The fade is off
  * for every annotation layer unless that layer opts in, and the only thing that
- * opts anything in is getPromptAnnotationSource in custom/drawing_tool_handler.ts.
+ * opts anything in is armPromptLayerFade in custom/drawing_tool_handler.ts.
+ * ⚠️ Not getPromptAnnotationSource, which is where arming it looked equivalent
+ * and is not -- see the warning on that function.
  * The live value is per layer, on AnnotationDisplayState
  * (annotation/annotation_layer_state.ts); these two constants are just what the
  * prompt layers are set to.
@@ -117,3 +119,26 @@ export const sliceFadeSlices = 5;
  *  Changing the SHAPE of the curve is a one-line edit in getSliceFadeFactor,
  *  not a change here. */
 export const sliceFadeCurve = 1;
+
+/**
+ * The fade factor, as GLSL, given an expression for the signed out-of-plane
+ * distance.
+ *
+ * Lives here rather than inline in type_handler so that it can be pinned by a
+ * test that reads the real string instead of a hand-written mirror of it. That
+ * matters more than it looks: turning the `<=` into a `<` makes an opted-out
+ * layer divide by zero, `1.0 - abs(d)/0.0` is -inf, the clamp takes it to 0 and
+ * EVERY layer that has not opted in disappears entirely, point clouds included.
+ * That is the exact failure this whole per-layer design exists to prevent, and
+ * one character reintroduces it.
+ *
+ * Parenthesised as a whole because callers use it inside a larger expression
+ * (`ng_LineWidth *= ...` in line.ts and polyline.ts).
+ */
+export function sliceFadeFactorGlsl(signedDistanceExpr: string): string {
+  return (
+    "(uSliceFadeSlices <= 0.0 ? 1.0 : " +
+    `pow(clamp(1.0 - abs(${signedDistanceExpr}) / uSliceFadeSlices, 0.0, 1.0),` +
+    " uSliceFadeCurve))"
+  );
+}
