@@ -110,15 +110,37 @@ for (int i = 0; i < ${rank}; ++i) {
 ng_LineWidth = 1.0;
 vColor = vec4(0.0, 0.0, 0.0, 0.0);
 ${this.invokeUserMain}
+// A box or a lasso keeps its geometry: that outline is the region the user
+// handed the model, and shrinking it would misreport the data. What thins with
+// distance is the stroke. The signed distance is affine in the position, so the
+// segment's midpoint value is just the mean of its two endpoints -- no
+// interpolation and no temporary array needed.
+
+float ng_sliceFadeMidDistance = 0.5 * (
+    getSliceSignedOutOfPlaneDistance(modelPositionA) +
+    getSliceSignedOutOfPlaneDistance(modelPositionB));
+ng_LineWidth *= ${this.getSliceFadeFactor("ng_sliceFadeMidDistance")};
 emitLine(uModelViewProjection * vec4(projectModelVectorToSubspace(modelPositionA), 1.0),
          uModelViewProjection * vec4(projectModelVectorToSubspace(modelPositionB), 1.0),
          ng_LineWidth);
 ${this.setPartIndex(builder)};
 `);
       builder.setFragmentMain(`
+// vModelPosition is the interpolated position, and the signed distance is
+// affine in it, so computing the distance here is exactly the same as
+// interpolating the distance -- and avoids interpolating the fade, which
+// has a kink at zero and would flatten a segment that crosses the slice.
+float ng_sliceFade = ${this.getSliceFadeFactor(
+        "getSliceSignedOutOfPlaneDistance(vModelPosition)",
+      )};
+// discard, not alpha zero. The slice panel writes colour and pick ID in one
+// pass and the pick attachment's alpha is hardcoded to 1, with no depth
+// attachment on the framebuffer -- so a line faded to invisible would stay
+// hoverable and could take the hover from one the user can actually see.
+if (ng_sliceFade <= 0.0) discard;
 float clipCoefficient = getSubspaceClipCoefficient(vModelPosition);
 emitAnnotation(vec4(vColor.rgb, vColor.a * getLineAlpha() *
-                                ${this.getCrossSectionFadeFactor()} *
+                                ng_sliceFade * ${this.getCrossSectionFadeFactor()} *
                                 clipCoefficient));
 `);
     },
@@ -129,7 +151,10 @@ emitAnnotation(vec4(vColor.rgb, vColor.a * getLineAlpha() *
     (builder: ShaderBuilder) => {
       const { rank } = this;
       this.defineShader(builder);
-      defineCircleShader(builder, this.targetIsSliceView);
+      // Replaced by the slice fade below, not stacked on it. The old fade here
+      // is the one variant that was never clamped, so an endpoint marker could
+      // brighten rather than dim as it went out of range.
+      defineCircleShader(builder, /*crossSectionFade=*/ this.targetIsSliceView);
       builder.addVarying("highp float", "vClipCoefficient");
       builder.addVarying("highp vec4", "vBorderColor");
       defineNoOpLineSetters(builder);
@@ -159,6 +184,18 @@ for (int i = 0; i < ${rank}; ++i) {
   modelPosition[i] = mix(modelPosition[i], modelPositionB[i], float(getEndpointIndex()));
 }
 vClipCoefficient = getSubspaceClipCoefficient(modelPosition);
+// A vertex marker fades and vanishes with the segment it belongs to; a
+// lasso whose outline had gone while its corner dots remained would be
+// worse than either. Same cull as points: this runs before the pick id
+// is written, so an invisible marker is not hoverable.
+float ng_sliceFade = ${this.getSliceFadeFactor(
+        "getSliceSignedOutOfPlaneDistance(modelPosition)",
+      )};
+if (ng_sliceFade <= 0.0) {
+  gl_Position = vec4(2.0, 0.0, 0.0, 1.0);
+  return;
+}
+vClipCoefficient *= ng_sliceFade;
 vColor = vec4(0.0, 0.0, 0.0, 0.0);
 vBorderColor = vec4(0.0, 0.0, 0.0, 1.0);
 ng_markerDiameter = 5.0;

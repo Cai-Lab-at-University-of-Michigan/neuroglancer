@@ -25,6 +25,7 @@ import {
   propertyTypeDataType,
 } from "#src/annotation/index.js";
 import type { AnnotationLayer } from "#src/annotation/renderlayer.js";
+import { sliceFadeFactorGlsl } from "#src/annotation/slice_fade.js";
 import type { PerspectiveViewRenderContext } from "#src/perspective_view/render_layer.js";
 import type { ChunkDisplayTransformParameters } from "#src/render_coordinate_transform.js";
 import type { SliceViewPanelRenderContext } from "#src/sliceview/renderlayer.js";
@@ -63,6 +64,23 @@ export type AnnotationShaderGetter = ParameterizedContextDependentShaderGetter<
   ShaderModule,
   ShaderControlsBuilderState
 >;
+
+/**
+ * Clamp a slice-fade uniform into a range the shader can express.
+ *
+ * `Math.max` alone will not do it: it returns NaN for a NaN input, and a NaN
+ * uniform makes every fragment in the layer NaN with no error reported
+ * anywhere.
+ */
+function clampSliceFade(
+  value: number,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, value));
+}
 
 export interface AnnotationRenderContext {
   buffer: GLBuffer;
@@ -373,6 +391,11 @@ export abstract class AnnotationRenderHelper extends AnnotationRenderHelperBase 
         // Specifies center vector and per-dimension scale in model coordinates used for
         // clipping.
         builder.addUniform("highp float", "uModelClipBounds", rank * 2);
+
+        // How far from its own slice an annotation stays visible, and how fast
+        // it dims on the way there. See annotation/slice_fade.ts.
+        builder.addUniform("highp float", "uSliceFadeSlices");
+        builder.addUniform("highp float", "uSliceFadeCurve");
         builder.addUniform("highp uint", "uPickID");
         builder.addVarying("highp uint", "vPickID", "flat");
 
@@ -405,7 +428,7 @@ float getSubspaceClipCoefficient(float modelPoint[${this.rank}]) {
 `;
         builder.addVertexCode(glsl_getSubspaceClipCoefficient);
         builder.addFragmentCode(glsl_getSubspaceClipCoefficient);
-        builder.addVertexCode(`
+        const glsl_projectModelVectorToSubspace = `
 vec3 projectModelVectorToSubspace(float modelPoint[${this.rank}]) {
   vec3 result = vec3(0.0, 0.0, 0.0);
   for (int i = 0; i < ${rank}; ++i) {
@@ -413,6 +436,35 @@ vec3 projectModelVectorToSubspace(float modelPoint[${this.rank}]) {
   }
   return result;
 }
+`;
+        // Vertex only. An earlier revision added a fragment copy too, with a
+        // comment claiming lines and polylines needed it per fragment; they do
+        // not. What they need per fragment is getSliceSignedOutOfPlaneDistance
+        // below, which reads uSubspaceMatrix itself and calls nothing here.
+        // Every call site is in vertex code (point, line, polyline,
+        // bounding_box, ellipsoid), so the fragment copy was dead.
+        builder.addVertexCode(glsl_projectModelVectorToSubspace);
+
+        const glsl_getSliceSignedOutOfPlaneDistance = `
+float getSliceSignedOutOfPlaneDistance(float modelPoint[${this.rank}]) {
+  vec3 subDelta = vec3(0.0, 0.0, 0.0);
+  for (int i = 0; i < ${rank}; ++i) {
+    subDelta += uSubspaceMatrix[i] * (modelPoint[i] - uModelClipBounds[i]);
+  }
+  vec3 n = vec3(uModelViewProjection[0][2],
+                uModelViewProjection[1][2],
+                uModelViewProjection[2][2]);
+  float len = length(n);
+  // mat4.invert on the chunk-to-layer transform is unchecked upstream, so a
+  // rank-deficient one reaches here as a zero row. normalize(vec3(0)) is NaN,
+  // and a NaN alpha blanks the whole layer with no error anywhere.
+  if (len < 1e-20) return 0.0;
+  return dot(subDelta, n) / len;
+}
+`;
+        builder.addVertexCode(glsl_getSliceSignedOutOfPlaneDistance);
+        builder.addFragmentCode(glsl_getSliceSignedOutOfPlaneDistance);
+        builder.addVertexCode(`
 
 float getMaxEndpointSubspaceClipCoefficient(float modelPointA[${this.rank}],  float modelPointB[${this.rank}]) {
   float coefficient = 1.0;
@@ -607,6 +659,42 @@ if (ng_discardValue) {
 `;
   }
 
+  /**
+   * Fade an annotation out over uSliceFadeSlices slices, and past that draw
+   * nothing at all.
+   *
+   * `expr` must be a SIGNED distance, not a fade. dot(subDelta, n) is affine in
+   * the model position and w is constant under the slice view's orthographic
+   * projection, so a varying carrying the signed value interpolates exactly.
+   * clamp(1 - |d|/N) does not: it has a kink at d == 0, so a segment running
+   * from -2 to +2 slices would interpolate to a flat 1/3 instead of peaking at
+   * its midpoint. Take the absolute value and clamp here, in the fragment.
+   *
+   * ⚠️ The unit is slices, and the reason is NOT that uSubspaceMatrix is a 0/1
+   * selection matrix -- that only preserves whatever units chunk space has.
+   * canonicalVoxelFactors really are in this pipeline: Pose.toMat4
+   * (navigation_state.ts) scales row i of the inverse view matrix by
+   * zoom/cvf[i], so they reach `n`, and the normalize() in
+   * getSliceSignedOutOfPlaneDistance is the only thing that removes them.
+   * DO NOT DELETE THAT NORMALIZE AS REDUNDANT. What makes one unit of distance
+   * equal one slice is that translateVoxelsRelative (navigation_state.ts)
+   * applies only the orientation quaternion and adds straight onto global voxel
+   * coordinates with no cvf -- so one wheel click is +1 in the same
+   * voxel-count space subDelta lives in.
+   *
+   * Changing the shape of the curve is this one expression.
+   */
+  getSliceFadeFactor(signedDistanceExpr: string) {
+    if (!this.targetIsSliceView) return "(1.0)";
+    // uSliceFadeSlices <= 0 is a layer that has not opted in, and it is the
+    // common case: prompts fade, everything else does not. The branch is on a
+    // uniform, so every invocation in a draw takes the same side of it and
+    // there is no divergence to pay for. It also guards the division, which
+    // would otherwise be by zero for exactly those layers.
+    //
+    return sliceFadeFactorGlsl(signedDistanceExpr);
+  }
+
   getCrossSectionFadeFactor() {
     if (this.targetIsSliceView) {
       return "(clamp(1.0 - 2.0 * abs(0.5 - gl_FragCoord.z), 0.0, 1.0))";
@@ -633,6 +721,25 @@ if (ng_discardValue) {
     );
     gl.uniform3fv(shader.uniform("uSubspaceMatrix"), context.subspaceMatrix);
     gl.uniform1fv(shader.uniform("uModelClipBounds"), context.modelClipBounds);
+    // Per layer, not global: a layer that has not opted in sends 0, which the
+    // shader reads as "no fade" and leaves untouched. annotationLayer is
+    // destructured above and is non-optional on AnnotationRenderContext.
+    //
+    // Bounded here rather than trusted, because this is where every value
+    // arrives however it was set. The two failure modes are not symmetric: a
+    // silly `slices` only makes the fade a no-op, but `curve <= 0` breaks the
+    // cull -- pow(0, negative) is +inf so nothing is ever culled, and pow(0, 0)
+    // is undefined in the GLSL ES spec at exactly the cut-off distance, which
+    // would make the boundary depend on the driver.
+    const { displayState } = annotationLayer.state;
+    gl.uniform1f(
+      shader.uniform("uSliceFadeSlices"),
+      clampSliceFade(displayState.sliceFadeSlices.value, 0, 0, 1e6),
+    );
+    gl.uniform1f(
+      shader.uniform("uSliceFadeCurve"),
+      clampSliceFade(displayState.sliceFadeCurve.value, 1, 0.01, 100),
+    );
     gl.uniformMatrix4fv(
       shader.uniform("uModelViewProjection"),
       false,
