@@ -160,9 +160,12 @@ describe("an oblique cross-section under anisotropy reads short", () => {
     }
   });
 
-  it("never reads long, so the error is always 'survives too far'", () => {
-    // The direction matters more than the size: the fade can only ever be too
-    // generous, never cut something off early.
+  it("never reads long, as a property of the formula alone", () => {
+    // Cauchy-Schwarz: a.Ca <= |a||Ca|. Taken by itself this says the fade can
+    // only ever be too generous.
+    //
+    // ⚠️ Do not carry that conclusion over to what a user sees. The next
+    // describe block is the reason, and it goes the other way.
     for (const A of [1, 2, 3, 8, 40]) {
       for (let deg = 0; deg <= 90; deg += 1) {
         expect(obliqueReading(A, (deg * Math.PI) / 180)).toBeLessThanOrEqual(
@@ -197,5 +200,73 @@ describe("an oblique cross-section under anisotropy reads short", () => {
     // browser check 13 could not be run on 2026-08-25. If a rotation control
     // ever appears, this is the arithmetic that says what to expect.
     expect(obliqueReading(3, Math.PI / 3)).toBeCloseTo(0.8660254, 6);
+  });
+});
+
+/**
+ * What a WHEEL CLICK reads, which is not what the formula above says.
+ *
+ * `translateVoxelsRelative` (navigation_state.ts) adds the rotated unit vector
+ * onto the position and then puts every display coordinate through
+ * `clampAndRoundCoordinateToVoxelCenter`, so the camera snaps back to a unit
+ * lattice after every click. Whenever the view normal is not a chunk axis the
+ * ideal step is therefore never taken, and the rounding error is larger than
+ * the formula's own bias and does not share its sign.
+ */
+function clickReading(anisotropy: number, thetaRadians: number): number {
+  const a = [0, -Math.sin(thetaRadians), Math.cos(thetaRadians)];
+  const Ca = [0, a[1], anisotropy * a[2]];
+  const n = Math.hypot(Ca[1], Ca[2]);
+  const pos = [0, 0, 0];
+  let prev = [...pos];
+  for (let click = 0; click < 3; ++click) {
+    // three clicks in, the lattice pattern has settled
+    prev = [...pos];
+    for (const i of [1, 2]) pos[i] = Math.round(pos[i] + a[i]);
+  }
+  const step = [0, pos[1] - prev[1], pos[2] - prev[2]];
+  return Math.abs(step[1] * Ca[1] + step[2] * Ca[2]) / n;
+}
+
+describe("a wheel click is not the formula, and can cull EARLY", () => {
+  it("is exactly one slice whenever the view normal is a chunk axis", () => {
+    for (const A of [1, 3, 8, 40]) {
+      expect(clickReading(A, 0)).toBeCloseTo(1, 12);
+    }
+  });
+
+  it("matches the four cases quoted in slice_fade.ts", () => {
+    expect(clickReading(8, (30 * Math.PI) / 180)).toBeCloseTo(0.99741, 5);
+    expect(clickReading(3, (45 * Math.PI) / 180)).toBeCloseTo(1.26491, 5);
+    expect(clickReading(3, (60 * Math.PI) / 180)).toBeCloseTo(1.36603, 5);
+    expect(clickReading(1, (45 * Math.PI) / 180)).toBeCloseTo(Math.SQRT2, 12);
+  });
+
+  it("needs NO anisotropy at all: isotropic at 45 degrees culls early", () => {
+    // ⚠️ The whole reason this block exists, and the part the 2026-08-25 review
+    // did not have. With perfectly cubic voxels, rotating the cross-section 45
+    // degrees rounds the ideal step (0, -0.7071, 0.7071) to (0, -1, 1), whose
+    // length is sqrt(2). A click therefore covers 1.414 slices, five slices are
+    // crossed in four clicks, and the annotation vanishes one click early.
+    //
+    // So "the error needs anisotropy plus rotation, and always errs toward
+    // surviving too far" is wrong twice over: rotation alone is enough, and the
+    // sign is the other way.
+    const perClick = clickReading(1, (45 * Math.PI) / 180);
+    expect(perClick).toBeCloseTo(Math.SQRT2, 12);
+    expect(perClick).toBeGreaterThan(1);
+    expect(Math.ceil(5 / perClick)).toBe(4);
+  });
+
+  it("is a bigger effect than the formula, and unrelated to it", () => {
+    // At 8x/30 the rounding nearly cancels the formula's 10% shortfall out
+    // (0.900 -> 0.997). At 3x/60, where the formula is at its worst (0.866),
+    // the click reads 1.366 -- past 1, in the opposite direction. Knowing one
+    // tells you nothing about the other.
+    expect(clickReading(8, (30 * Math.PI) / 180)).toBeGreaterThan(
+      obliqueReading(8, (30 * Math.PI) / 180),
+    );
+    expect(obliqueReading(3, Math.atan(Math.sqrt(3)))).toBeLessThan(1);
+    expect(clickReading(3, Math.atan(Math.sqrt(3)))).toBeGreaterThan(1);
   });
 });

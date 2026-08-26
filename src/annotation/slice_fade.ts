@@ -65,22 +65,49 @@
  * and "the slab is finite" were both true at once. This pulls the cut-off in to
  * `slices` and turns it into a gradient.
  *
- * ⚠️ ANISOTROPY PLUS AN OBLIQUE CROSS-SECTION READS SHORT, and this note exists
- * so nobody has to rediscover it from a confusing screen. The distance is
- * measured along the view normal, and the voxel factors cancel exactly only
- * when the cross-section is axis-aligned. Rotate it and one slice step reads as
+ * ⚠️ ANISOTROPY PLUS AN OBLIQUE CROSS-SECTION DOES NOT MEASURE ONE SLICE PER
+ * CLICK, and the honest version of this note took two passes to get right. Two
+ * separate effects, in opposite directions, and the second is the bigger one.
+ *
+ * The formula. The distance is measured along the view normal, and the voxel
+ * factors cancel exactly only when the cross-section is axis-aligned. Rotate it
+ * and a unit step along the normal reads
  *
  *     (sin^2 t + A cos^2 t) / sqrt(sin^2 t + A^2 cos^2 t)
  *
- * for anisotropy A in z and rotation t. That is at most 1 and never more, so
- * the error is always in the direction of surviving too far rather than being
- * cut off early. The worst case is 2*sqrt(A)/(1+A) at t = atan(sqrt(A)): 0.866
- * at A = 3, and 0.629 at A = 8. Pinned in slice_fade.spec.ts.
+ * for anisotropy A in z and rotation t. By Cauchy-Schwarz that is at most 1,
+ * worst at t = atan(sqrt(A)) where it is 2*sqrt(A)/(1+A): 0.866 at A = 3, and
+ * 0.629 at A = 8. Taken alone this says the fade is always too generous.
+ *
+ * ⚠️ TAKEN ALONE IT IS ALSO MISLEADING, because that unit step is never the
+ * step. translateVoxelsRelative (navigation_state.ts) puts every display
+ * coordinate through clampAndRoundCoordinateToVoxelCenter, so the camera snaps
+ * to a unit lattice after each wheel click and the ideal step is unreachable
+ * whenever the normal is not a chunk axis. What a user actually gets:
+ *
+ *     A = 8, t = 30 deg   formula 0.900   per click 0.997   gone after 6 clicks
+ *     A = 3, t = 45 deg   formula 0.894   per click 1.265   gone after 4 clicks
+ *     A = 3, t = 60 deg   formula 0.866   per click 1.366   gone after 4 clicks
+ *     A = 1, t = 45 deg   formula 1.000   per click 1.414   gone after 4 clicks
+ *
+ * Read the last row first. ⚠️ IT NEEDS NO ANISOTROPY AT ALL: with cubic voxels
+ * and a 45 degree rotation the ideal step (0, -0.7071, 0.7071) rounds to
+ * (0, -1, 1), which is sqrt(2) long, so a click covers 1.414 slices and the
+ * annotation is culled one click early. The rounding is the bigger effect, it
+ * usually points the other way from the formula, and rotation alone is enough
+ * to cause it. "Always errs toward surviving too far" is true of the formula
+ * and false of the viewer, and only the second is what anybody sees.
+ *
+ * All eight figures are pinned in slice_fade.spec.ts, which is where they were
+ * corrected: the first draft of this paragraph had the A=3, t=60 figure at 0.5
+ * because it was computed in Python, whose round() breaks ties to even while
+ * Math.round does not.
  *
  * A sheared layer transform does the same thing with no rotation at all, so
- * "anisotropy plus rotation" is the common case rather than the only one.
+ * "oblique" really means "the view normal is not a chunk axis", of which
+ * rotation is one route.
  *
- * None of this is reachable from SAVAII today -- the embedded viewer offers no
+ * None of it is reachable from SAVAII today -- the embedded viewer offers no
  * way to rotate a cross-section, which is why browser check 13 could not be run
  * on 2026-08-25. No defensive code, on purpose.
  */
