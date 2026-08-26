@@ -22,18 +22,24 @@
  *            leaves it at 80%.
  *
  * ⚠️ These are deliberately global rather than per layer: one behaviour, one
- * number, decided 2026-08-25. They are WatchableValues rather than plain
- * numbers for two reasons -- the render layer has to be able to subscribe, or
- * changing one repaints nothing (see registerSliceFadeRedraw), and the read
- * point is the only thing that has to move if they ever become per-scene or
- * per-layer settings. The uniform is already uploaded per draw and per panel,
- * so a future per-layer value would mean sourcing it from
- * AnnotationDisplayState (annotation_layer_state.ts, which already holds
- * per-layer WatchableValues) and changing nothing else -- not the shader, not
- * the upload.
+ * number, decided 2026-08-25.
+ *
+ * ⚠️ They are also FIXED, with nothing able to change them at runtime. A pair of
+ * panel controls existed while these values were being chosen and was removed
+ * once they were: the numbers below are what that tuning settled on, so the
+ * control had done its job. Both remain uniforms rather than GLSL literals
+ * because that is the seam a future per-scene or per-layer value would use --
+ * source them from AnnotationDisplayState (annotation_layer_state.ts already
+ * holds per-layer WatchableValues) and neither the shader nor the upload
+ * changes.
+ *
+ * ⚠️ IF YOU MAKE THESE SETTABLE AGAIN, SUBSCRIBE TO THEM. A value that can
+ * change but that AnnotationLayer does not listen to repaints only when
+ * something else happens to trigger a frame, which from the user's side is
+ * indistinguishable from the control being dead. That subscription lived in
+ * renderlayer.ts and went with the controls; putting the setter back without it
+ * is the trap this paragraph exists to prevent.
  */
-
-import { WatchableValue } from "#src/trackable_value.js";
 
 /**
  * Measured on a 1024x1024x1022 dataset: scrolling one direction until a seed
@@ -54,8 +60,9 @@ import { WatchableValue } from "#src/trackable_value.js";
  * and "the slab is finite" were both true at once. This pulls the cut-off in to
  * `slices` and turns it into a gradient.
  */
-export const sliceFadeSlices = new WatchableValue<number>(5);
+export const sliceFadeSlices = 5;
 
-/** Exponent on the fade. 1 is linear. Changing the shape of the curve is a
- *  one-line edit in getSliceFadeFactor, not a change here. */
-export const sliceFadeCurve = new WatchableValue<number>(1);
+/** Exponent on the fade. 1 is linear, and 1 is what the tuning settled on.
+ *  Changing the SHAPE of the curve is a one-line edit in getSliceFadeFactor,
+ *  not a change here. */
+export const sliceFadeCurve = 1;

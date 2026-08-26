@@ -701,8 +701,8 @@ if (ng_discardValue) {
     );
     gl.uniform3fv(shader.uniform("uSubspaceMatrix"), context.subspaceMatrix);
     gl.uniform1fv(shader.uniform("uModelClipBounds"), context.modelClipBounds);
-    gl.uniform1f(shader.uniform("uSliceFadeSlices"), sliceFadeSlices.value);
-    gl.uniform1f(shader.uniform("uSliceFadeCurve"), sliceFadeCurve.value);
+    gl.uniform1f(shader.uniform("uSliceFadeSlices"), sliceFadeSlices);
+    gl.uniform1f(shader.uniform("uSliceFadeCurve"), sliceFadeCurve);
     gl.uniformMatrix4fv(
       shader.uniform("uModelViewProjection"),
       false,
