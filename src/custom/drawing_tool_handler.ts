@@ -4,6 +4,10 @@ import {
 } from "#src/annotation/slice_fade.js";
 import type { DrawingTool } from "#src/custom/drawing_tool.js";
 import { initMinimap, getMinimap } from "#src/custom/minimap.js";
+import {
+  DATA_PANEL_SELECTOR,
+  isOnDataPanel,
+} from "#src/custom/panel_hit.js";
 import { initViewportHandler } from "#src/custom/viewport_handler.js";
 import { ALLOWED_UNITS } from "#src/widget/scale_bar.js";
 // [BUG-016] Prompts are rendered as annotations rather than as canvas overlay
@@ -38,7 +42,6 @@ interface BrushStroke extends BaseStroke {
 
 type Stroke = BrushStroke;
 
-const DATA_PANEL_SELECTOR = ".neuroglancer-rendered-data-panel";
 
 const strokeData: Stroke[] = [];
 const promptData: Prompt[] = [];
@@ -201,10 +204,6 @@ function pushUniquePoint(arr: StrokePoint[], p: StrokePoint) {
   if (!last || last.x !== p.x || last.y !== p.y || last.z !== p.z) {
     arr.push(p);
   }
-}
-
-function isOnDataPanel(e: MouseEvent): boolean {
-  return !!(e.target as HTMLElement).closest(DATA_PANEL_SELECTOR);
 }
 
 // Hand tool: temporarily override the grab cursor (set by drawing_tool.ts
