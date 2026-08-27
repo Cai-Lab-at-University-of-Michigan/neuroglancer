@@ -75,7 +75,9 @@ describe("what counts as a click on the image", () => {
   });
 
   it("says no to an element outside any panel", () => {
-    expect(isOnDataPanel({ target: document.createElement("div") })).toBe(false);
+    expect(isOnDataPanel({ target: document.createElement("div") })).toBe(
+      false,
+    );
   });
 
   it("says no rather than throwing when there is no target", () => {
