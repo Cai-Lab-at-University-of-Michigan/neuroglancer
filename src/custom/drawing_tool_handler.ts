@@ -295,11 +295,23 @@ interface SeedLayerSpec {
   vertexMarkers: boolean;
 }
 
-// The marker size and border are the polyline's own defaults, read off
+// The endpoint marker size and border are the polyline's own defaults, read off
 // polyline.ts (ng_PolyMarkerDiameter = 5.0, ng_PolyMarkerBorderWidth = 1.0).
 // A point annotation defaults to a smaller dot with no border at all, which is
-// what made a placed seed hard to see; setting both from the same numbers here
-// is what makes a point and a vertex look alike rather than merely similar.
+// what made a placed seed hard to see.
+//
+// ⚠️ These two are NOT interchangeable, and one number used to feed both. Both
+// become a diameter in screen pixels, but only the point one is scaled on the
+// way: point.ts multiplies it by clamp(projScale * 500.0, 0.5, 3.0), while an
+// endpoint marker reaches emitCircle unscaled. So a single 5.0 drew a 5 px
+// vertex and a point of anywhere from 2.5 to 15 px -- three times the vertex at
+// the zoom ceiling, which is what "the point prompt is too big" was.
+//
+// They can only agree at one zoom, so no single value fixes it. 2.5 halves the
+// point and brings the worst case to 1.5x the vertex while staying visible when
+// zoomed out, where it is 1.25 px. Chosen by eye against real data, Scott,
+// 2026-08-26.
+const SEED_POINT_DIAMETER = 2.5;
 const SEED_MARKER_DIAMETER = 5.0;
 const SEED_MARKER_BORDER = 1.0;
 const SEED_LINE_WIDTH = 2.0;
@@ -325,7 +337,7 @@ function seedLayerShader(spec: SeedLayerSpec): string {
   return `
 void main() {
   setColor(vec4(${r.toFixed(1)}, ${g.toFixed(1)}, ${b.toFixed(1)}, 1.0));
-  setPointMarkerSize(${SEED_MARKER_DIAMETER.toFixed(1)});
+  setPointMarkerSize(${SEED_POINT_DIAMETER.toFixed(1)});
   setPointMarkerBorderWidth(${SEED_MARKER_BORDER.toFixed(1)});
   setPointMarkerBorderColor(vec4(0.0, 0.0, 0.0, 0.85));
   setEndpointMarkerSize(${markerSize.toFixed(1)});
