@@ -25,6 +25,7 @@ import {
   promptAnnotations,
   promptFromPanel,
 } from "#src/custom/prompt_annotations.js";
+import { PromptProbe } from "#src/custom/prompt_probe.js";
 import { makeLayer } from "#src/layer/index.js";
 
 interface BaseStroke {
@@ -592,23 +593,48 @@ function currentBundleName(): string {
   return "unknown";
 }
 
+function buildIdentity(): { commit: string; bundle: string } {
+  return {
+    commit:
+      typeof NEUROGLANCER_BUILD_COMMIT === "string"
+        ? NEUROGLANCER_BUILD_COMMIT
+        : "unknown",
+    bundle: currentBundleName(),
+  };
+}
+
 function sendBuildInfo(parent: Window) {
-  parent.postMessage(
-    {
-      type: "viewer_build_info",
-      commit:
-        typeof NEUROGLANCER_BUILD_COMMIT === "string"
-          ? NEUROGLANCER_BUILD_COMMIT
-          : "unknown",
-      bundle: currentBundleName(),
-    },
-    "*",
-  );
+  parent.postMessage({ type: "viewer_build_info", ...buildIdentity() }, "*");
 }
 
 export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
   const { canvas, ctx, viewer } = drawingTool;
   const container = viewer.display.container as HTMLElement;
+
+  // Prints a console record when a stroke's coordinates come out wrong: every
+  // point after pen-down identical, or pen-down away from the pointer. It
+  // reads and never changes what a stroke records. See prompt_probe.ts.
+  const probe = new PromptProbe(
+    viewer,
+    buildIdentity(),
+    undefined,
+    undefined,
+    () => ({
+      promptCount: promptData.length,
+      // Kinds whose cached source is no longer the live layer's. A state push
+      // from the Python server recreates every layer, and only prompt_clear
+      // and prompt_restore reset this cache, so in between new markers go to
+      // a disposed source.
+      staleCachedSources: SEED_LAYER_KINDS.filter((kind) => {
+        const cached = _promptSources[kind];
+        if (!cached) return false;
+        const live = viewer.layerManager.managedLayers.find(
+          (l: any) => l.name === SEED_LAYERS[kind].name,
+        );
+        return (live?.layer as any)?.localAnnotations !== cached;
+      }),
+    }),
+  );
 
   // Viewport channel — parent asks for the crosshair position so the
   // ECDF endpoint can localize histogram sampling to the region the
@@ -673,6 +699,7 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
   // -- Capture helpers ------------------------------------------------------
 
   const finishCapture = () => {
+    probe.end();
     isCapturing = false;
     drawingTool.isDrawing = false;
     ctx.globalCompositeOperation = "source-over";
@@ -703,6 +730,7 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
     e.preventDefault();
     e.stopPropagation();
     const { x: cx, y: cy } = containerCoords(e, container);
+    probe.begin(promptMode ?? mode, e, pt, { x: cx, y: cy });
     isCapturing = true;
     lastScreen.x = NaN;
     lastScreen.y = NaN;
@@ -833,7 +861,9 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
 
       // Skip recording/drawing when mouse is outside the data area,
       // but keep listeners alive so neuroglancer's state isn't confused
-      if (!isOnDataPanel(ev) || !isInDataBounds(viewer)) {
+      const onPanel = isOnDataPanel(ev);
+      if (!onPanel || !isInDataBounds(viewer)) {
+        probe.reject(onPanel ? "outsideData" : "offPanel");
         if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
         pendingXY = null;
         return;
@@ -852,6 +882,7 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
         }
       }
       const { x, y } = containerCoords(ev, container);
+      probe.sample({ x, y }, p);
       enqueueDraw(x, y);
     };
 
