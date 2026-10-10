@@ -52,6 +52,65 @@ export function isValidPoint(p: StrokePoint): boolean {
   return isFinite(p.x) && isFinite(p.y) && isFinite(p.z);
 }
 
+/**
+ * Where the pointer is, as a stroke should record it.
+ *
+ * Reads `unsnappedPosition`, never `position`. A slice panel's pick writes
+ * both (sliceview/panel.ts completePickRequest): `unsnappedPosition` is the
+ * point under the cursor, and `position` is then moved onto the nearest
+ * picked object within pickRadius, and onto the annotation itself when that
+ * object is one (annotation/renderlayer.ts updateMouseState -> snapPosition),
+ * in every dimension including Z. Earlier prompts are annotations, so a
+ * stroke drawn near one was pulled onto it: a straight line came out bent,
+ * partly on that prompt's slice, and those coordinates went to the model.
+ * Neuroglancer's own annotation tools place points from `unsnappedPosition`
+ * for the same reason (ui/annotations.ts
+ * getMousePositionInAnnotationCoordinates).
+ */
+export function pointFromMouseState(
+  mouseState: any,
+  coordinateSpace: any,
+): StrokePoint {
+  const p = mouseState?.unsnappedPosition;
+  if (!p || p.length < 3) return { x: NaN, y: NaN, z: NaN };
+
+  // Map position to x, y, z based on coordinate space dimension names
+  const names = coordinateSpace?.names;
+  if (names && names.length >= 3) {
+    const ix = names.indexOf("x");
+    const iy = names.indexOf("y");
+    const iz = names.indexOf("z");
+    if (ix >= 0 && iy >= 0 && iz >= 0) {
+      return { x: p[ix], y: p[iy], z: p[iz] };
+    }
+  }
+  // Fallback: assume position order is [x, y, z]
+  return { x: p[0], y: p[1], z: p[2] };
+}
+
+/**
+ * Whether the pointer is over the data, read from the same unsnapped value
+ * and for the same reason: a snapped position can sit inside the data while
+ * the cursor is outside it, or the other way round.
+ *
+ * Otherwise the check it replaces, unchanged: the first three stored
+ * dimensions, each finite, lower bound inclusive, upper bound exclusive.
+ */
+export function mouseInDataBounds(
+  mouseState: any,
+  coordinateSpace: any,
+): boolean {
+  const pos = mouseState?.unsnappedPosition;
+  const bounds = coordinateSpace?.bounds;
+  if (!pos || pos.length < 3 || !bounds) return false;
+  const { lowerBounds, upperBounds } = bounds;
+  for (let i = 0; i < 3; i++) {
+    if (!isFinite(pos[i])) return false;
+    if (pos[i] < lowerBounds[i] || pos[i] >= upperBounds[i]) return false;
+  }
+  return true;
+}
+
 // [BUG-016] Build a Float32Array point in NG coordinate space order.
 // The coordinate space is not always x, y, z in that order, and a point built
 // positionally lands somewhere else entirely when it is not.

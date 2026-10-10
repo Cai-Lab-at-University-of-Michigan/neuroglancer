@@ -15,6 +15,8 @@ import { describe, expect, it, vi } from "vitest";
 import { AnnotationType } from "#src/annotation/index.js";
 import {
   makeAnnotationPoint,
+  mouseInDataBounds,
+  pointFromMouseState,
   promptAnnotations,
   promptFromPanel,
 } from "#src/custom/prompt_annotations.js";
@@ -252,5 +254,114 @@ describe("promptFromPanel reads back every shape the panel sends", () => {
     expect(promptFromPanel({ type: "point", data: {} })?.polarity).toBe(
       "positive",
     );
+  });
+});
+
+/**
+ * A pick that landed near an earlier prompt, as recorded on rejoin
+ * 2026-10-10: the cursor on slice 735.5, `position` pulled onto a line prompt
+ * on slice 736.5 and a few voxels across. Stored z, y, x, which is not the
+ * order the function returns, so a positional read is caught too. Values are
+ * exact in float32.
+ */
+function snappedPick() {
+  return {
+    mouseState: {
+      position: new Float32Array([736.5, 759.25, 608.75]),
+      unsnappedPosition: new Float32Array([735.5, 758, 607.5]),
+    },
+    coordinateSpace: { names: ["z", "y", "x"] },
+  };
+}
+
+describe("a stroke records where the pointer is, not where a pick snapped to", () => {
+  it("takes the unsnapped position, Z included", () => {
+    const { mouseState, coordinateSpace } = snappedPick();
+    expect(pointFromMouseState(mouseState, coordinateSpace)).toEqual({
+      x: 607.5,
+      y: 758,
+      z: 735.5,
+    });
+  });
+
+  it("falls back to storage order when the space has no x, y, z names", () => {
+    const mouseState = {
+      position: new Float32Array([9, 9, 9]),
+      unsnappedPosition: new Float32Array([1, 2, 3]),
+    };
+    expect(pointFromMouseState(mouseState, { names: ["a", "b", "c"] })).toEqual(
+      { x: 1, y: 2, z: 3 },
+    );
+    expect(pointFromMouseState(mouseState, undefined)).toEqual({
+      x: 1,
+      y: 2,
+      z: 3,
+    });
+  });
+
+  it("gives NaN, not the snapped value, before any unsnapped pick exists", () => {
+    // Neuroglancer starts unsnappedPosition as an empty array. A full
+    // `position` beside it must not be used as a stand-in.
+    const position = new Float32Array([1, 2, 3]);
+    for (const unsnappedPosition of [
+      new Float32Array(0),
+      new Float32Array([1, 2]),
+      undefined,
+    ]) {
+      const p = pointFromMouseState(
+        { position, unsnappedPosition },
+        { names: ["x", "y", "z"] },
+      );
+      expect([p.x, p.y, p.z].every(Number.isNaN)).toBe(true);
+    }
+    const none = pointFromMouseState(undefined, undefined);
+    expect([none.x, none.y, none.z].every(Number.isNaN)).toBe(true);
+  });
+});
+
+describe("the data-bounds gate asks about the pointer too", () => {
+  const space = {
+    bounds: { lowerBounds: [0, 0, 0], upperBounds: [1000, 1000, 800] },
+  };
+
+  it("says inside when only the snapped position is outside", () => {
+    const mouseState = {
+      position: new Float32Array([1200, 500, 400]),
+      unsnappedPosition: new Float32Array([990, 500, 400]),
+    };
+    expect(mouseInDataBounds(mouseState, space)).toBe(true);
+  });
+
+  it("says outside when only the snapped position is inside", () => {
+    const mouseState = {
+      position: new Float32Array([990, 500, 400]),
+      unsnappedPosition: new Float32Array([1200, 500, 400]),
+    };
+    expect(mouseInDataBounds(mouseState, space)).toBe(false);
+  });
+
+  it("keeps the old edges: lower bound in, upper bound out", () => {
+    const at = (x: number) => ({
+      unsnappedPosition: new Float32Array([x, 0, 0]),
+    });
+    expect(mouseInDataBounds(at(0), space)).toBe(true);
+    expect(mouseInDataBounds(at(1000), space)).toBe(false);
+  });
+
+  it("says outside when there is nothing to judge", () => {
+    const full = new Float32Array([5, 5, 5]);
+    expect(
+      mouseInDataBounds(
+        { position: full, unsnappedPosition: new Float32Array(0) },
+        space,
+      ),
+    ).toBe(false);
+    expect(
+      mouseInDataBounds(
+        { unsnappedPosition: new Float32Array([NaN, 5, 5]) },
+        space,
+      ),
+    ).toBe(false);
+    expect(mouseInDataBounds({ unsnappedPosition: full }, {})).toBe(false);
   });
 });

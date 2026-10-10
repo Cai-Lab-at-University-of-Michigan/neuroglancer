@@ -22,6 +22,8 @@ import type {
 } from "#src/custom/prompt_annotations.js";
 import {
   isValidPoint,
+  mouseInDataBounds,
+  pointFromMouseState,
   promptAnnotations,
   promptFromPanel,
 } from "#src/custom/prompt_annotations.js";
@@ -187,16 +189,9 @@ function drawLockedRegionIndicator(
   }
 }
 
+// Both read the pointer's unsnapped position; see pointFromMouseState for why.
 function isInDataBounds(viewer: any): boolean {
-  const pos = viewer?.mouseState?.position;
-  const bounds = viewer?.coordinateSpace?.value?.bounds;
-  if (!pos || pos.length < 3 || !bounds) return false;
-  const { lowerBounds, upperBounds } = bounds;
-  for (let i = 0; i < 3; i++) {
-    if (!isFinite(pos[i])) return false;
-    if (pos[i] < lowerBounds[i] || pos[i] >= upperBounds[i]) return false;
-  }
-  return true;
+  return mouseInDataBounds(viewer?.mouseState, viewer?.coordinateSpace?.value);
 }
 
 function pushUniquePoint(arr: StrokePoint[], p: StrokePoint) {
@@ -221,22 +216,7 @@ function setNavigateGrabbing(grabbing: boolean) {
 }
 
 function voxelPoint(viewer: any): StrokePoint {
-  const p = viewer?.mouseState?.position;
-  if (!p || p.length < 3) return { x: NaN, y: NaN, z: NaN };
-
-  // Map position to x, y, z based on coordinate space dimension names
-  const coordSpace = viewer?.coordinateSpace?.value;
-  const names = coordSpace?.names;
-  if (names && names.length >= 3) {
-    const idx_x = names.indexOf("x");
-    const idx_y = names.indexOf("y");
-    const idx_z = names.indexOf("z");
-    if (idx_x >= 0 && idx_y >= 0 && idx_z >= 0) {
-      return { x: p[idx_x], y: p[idx_y], z: p[idx_z] };
-    }
-  }
-  // Fallback: assume position order is [x, y, z]
-  return { x: p[0], y: p[1], z: p[2] };
+  return pointFromMouseState(viewer?.mouseState, viewer?.coordinateSpace?.value);
 }
 
 function containerCoords(e: MouseEvent, container: HTMLElement) {
