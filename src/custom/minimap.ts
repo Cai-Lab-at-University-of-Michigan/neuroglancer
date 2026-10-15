@@ -58,7 +58,57 @@ interface ThumbnailCacheEntry {
 const thumbnailCache = new Map<string, ThumbnailCacheEntry>();
 const thumbnailRerenderSubscribers = new Set<() => void>();
 let thumbnailMessageHandlerInstalled = false;
-let thumbnailContrast = 1;
+// Tone applied to every grayscale thumbnail before it is tinted. Both are CSS
+// filter factors, so 1 leaves the image as it is.
+//
+// Brightness arrives as `thumbnail_contrast`. The setting was labelled
+// "Contrast" while it always drove brightness(), and frontends already
+// deployed send that type with a brightness value, so the type keeps its old
+// name and its old meaning. Real contrast has its own type,
+// `thumbnail_true_contrast`, which a viewer built before it existed ignores.
+const thumbnailTone = { brightness: 1, contrast: 1 };
+
+function positiveFactor(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : undefined;
+}
+
+/**
+ * Apply a brightness or contrast message to the thumbnail tone. Returns
+ * whether the message was one of the two, whatever its value.
+ */
+export function applyThumbnailToneMessage(data: {
+  type?: unknown;
+  value?: unknown;
+}): boolean {
+  if (data.type === "thumbnail_contrast") {
+    const value = positiveFactor(data.value);
+    if (value !== undefined) thumbnailTone.brightness = value;
+    return true;
+  }
+  if (data.type === "thumbnail_true_contrast") {
+    const value = positiveFactor(data.value);
+    if (value !== undefined) thumbnailTone.contrast = value;
+    return true;
+  }
+  return false;
+}
+
+export function getThumbnailTone(): { brightness: number; contrast: number } {
+  return { ...thumbnailTone };
+}
+
+/** The canvas filter for a thumbnail's grayscale source. */
+export function thumbnailToneFilter(tone: {
+  brightness: number;
+  contrast: number;
+}): string {
+  const parts: string[] = [];
+  if (tone.brightness !== 1) parts.push(`brightness(${tone.brightness})`);
+  if (tone.contrast !== 1) parts.push(`contrast(${tone.contrast})`);
+  return parts.length > 0 ? parts.join(" ") : "none";
+}
 
 function thumbnailCacheKey(layerId: string, axis: Orientation, channel: number): string {
   return `${layerId}|${axis}|${channel}`;
@@ -151,12 +201,8 @@ function ensureThumbnailMessageHandler(): void {
       return;
     }
 
-    if (data.type === "thumbnail_contrast") {
-      const { value } = data as { value: number };
-      if (typeof value === "number" && Number.isFinite(value) && value > 0) {
-        thumbnailContrast = value;
-        notifyThumbnailSubscribers();
-      }
+    if (applyThumbnailToneMessage(data)) {
+      notifyThumbnailSubscribers();
       return;
     }
   });
@@ -510,17 +556,14 @@ class PanelMinimap extends RefCounted {
       }
       const tctx = tinter.getContext("2d");
       if (tctx) {
-        // Global brightness multiplier applied to the grayscale source
+        // Global brightness and contrast applied to the grayscale source
         // ONLY (not to the color fill, which would shift hue). CSS
         // filter is per-draw and resets between calls.
-        const brightnessFilter =
-          thumbnailContrast === 1
-            ? "none"
-            : `brightness(${thumbnailContrast})`;
+        const toneFilter = thumbnailToneFilter(thumbnailTone);
         for (const entry of matching) {
           tctx.globalCompositeOperation = "source-over";
           tctx.clearRect(0, 0, width, height);
-          tctx.filter = brightnessFilter;
+          tctx.filter = toneFilter;
           tctx.drawImage(entry.img, 0, 0, width, height);
           tctx.filter = "none";
           // `multiply` tints the grayscale source toward the color.
