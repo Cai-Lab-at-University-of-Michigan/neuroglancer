@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import { fitZoom, resetView } from "#src/custom/reset_view.js";
@@ -183,5 +184,16 @@ describe("resetView", () => {
     expect(Array.from(state.position)).toEqual([1, 2, 3]);
     expect(state.zoom).toBe(7);
     expect(calls).toEqual([]);
+  });
+});
+
+describe("the viewer's message handler", () => {
+  // Installing the handler needs a whole viewer, so this pins the wiring;
+  // the behaviour is tested on resetView above.
+  it("answers reset_view by resetting the view", () => {
+    const handler = readFileSync("src/custom/drawing_tool_handler.ts", "utf8");
+    expect(handler).toMatch(
+      /if \(type === "reset_view"\) \{\s*resetView\(viewer\);/,
+    );
   });
 });
