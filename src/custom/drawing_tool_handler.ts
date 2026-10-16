@@ -27,6 +27,7 @@ import {
   promptAnnotations,
   promptFromPanel,
 } from "#src/custom/prompt_annotations.js";
+import { resetView } from "#src/custom/reset_view.js";
 import { makeLayer } from "#src/layer/index.js";
 
 interface BaseStroke {
@@ -1188,6 +1189,11 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
       if (lockedZoomFactor !== null && navState?.zoomFactor) {
         navState.zoomFactor.value = lockedZoomFactor;
       }
+      safeRedraw(viewer);
+      return;
+    }
+    if (type === "reset_view") {
+      resetView(viewer);
       safeRedraw(viewer);
       return;
     }
