@@ -59,9 +59,9 @@ describe("three-panel layouts", () => {
     ]);
   });
 
-  it("give XY two thirds of the width, with XZ over YZ beside it", () => {
+  it("give XY the left half, with XZ over YZ in the right half", () => {
     expect(layouts.threePanelColumns("xy-main")).toEqual([
-      { flex: 2, panels: ["xy"] },
+      { flex: 1, panels: ["xy"] },
       { flex: 1, panels: ["xz", "yz"] },
     ]);
   });

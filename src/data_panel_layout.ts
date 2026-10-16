@@ -662,8 +662,8 @@ export class SinglePerspectiveLayout extends RefCounted {
 }
 
 // The three cross sections without a 3D view, in one of two arrangements:
-// "row" puts XY, XZ and YZ side by side; "xy-main" gives XY the left two
-// thirds and stacks XZ over YZ on the right.
+// "row" puts XY, XZ and YZ side by side; "xy-main" gives XY the left half
+// and stacks XZ over YZ in the right half.
 export type ThreePanelArrangement = "row" | "xy-main";
 
 export const THREE_PANEL_LAYOUTS = new Map<string, ThreePanelArrangement>([
@@ -684,7 +684,7 @@ export function threePanelColumns(
     ];
   }
   return [
-    { flex: 2, panels: ["xy"] },
+    { flex: 1, panels: ["xy"] },
     { flex: 1, panels: ["xz", "yz"] },
   ];
 }
