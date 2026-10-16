@@ -15,9 +15,10 @@
  */
 
 /**
- * The two layouts with the three cross sections and no 3D view. A layout name
- * the viewer does not know throws while the state is restored, so these names
- * must be registered before the portal can store them.
+ * The two layouts with the three cross sections and no 3D view. A viewer that
+ * does not know a layout name does not throw: TrackableValue drops the invalid
+ * value and the layout falls back to a single XY panel. So an older viewer
+ * shows one XY panel where the portal asked for three.
  */
 
 import { beforeAll, describe, expect, it } from "vitest";
