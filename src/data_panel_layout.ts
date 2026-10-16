@@ -661,6 +661,88 @@ export class SinglePerspectiveLayout extends RefCounted {
   }
 }
 
+// The three cross sections without a 3D view, in one of two arrangements:
+// "row" puts XY, XZ and YZ side by side; "xy-main" gives XY the left two
+// thirds and stacks XZ over YZ on the right.
+export type ThreePanelArrangement = "row" | "xy-main";
+
+export const THREE_PANEL_LAYOUTS = new Map<string, ThreePanelArrangement>([
+  ["3panel", "row"],
+  ["3panel-xy", "xy-main"],
+]);
+
+// Left to right: each column's share of the width, and its panels top to
+// bottom.
+export function threePanelColumns(
+  arrangement: ThreePanelArrangement,
+): { flex: number; panels: NamedAxes[] }[] {
+  if (arrangement === "row") {
+    return [
+      { flex: 1, panels: ["xy"] },
+      { flex: 1, panels: ["xz"] },
+      { flex: 1, panels: ["yz"] },
+    ];
+  }
+  return [
+    { flex: 2, panels: ["xy"] },
+    { flex: 1, panels: ["xz", "yz"] },
+  ];
+}
+
+// As in the 4-panel layout, only XY carries the scale bar and the display
+// dimensions widget.
+export class ThreePanelLayout extends RefCounted {
+  constructor(
+    public container: DataPanelLayoutContainer,
+    public rootElement: HTMLElement,
+    public viewer: ViewerUIState,
+    arrangement: ThreePanelArrangement,
+  ) {
+    super();
+    const { display } = viewer;
+    const sliceViewerState = {
+      ...getCommonSliceViewerState(viewer),
+      showScaleBar: viewer.showScaleBar,
+    };
+    const sliceViewerStateWithoutScaleBar = {
+      ...getCommonSliceViewerState(viewer),
+      showScaleBar: new TrackableBoolean(false, false),
+    };
+    const slicePanel = (axes: NamedAxes) => (element: HTMLElement) => {
+      const isMain = axes === "xy";
+      const panel = this.registerDisposer(
+        new SliceViewPanel(
+          display,
+          element,
+          makeNamedSliceView(viewer, axes),
+          isMain ? sliceViewerState : sliceViewerStateWithoutScaleBar,
+        ),
+      );
+      if (isMain) addDisplayDimensionsWidget(this, panel);
+      registerRelatedLayouts(this, panel, [axes, `${axes}-3d`]);
+    };
+    L.box(
+      "row",
+      threePanelColumns(arrangement).map(({ flex, panels }) =>
+        L.withFlex(
+          flex,
+          panels.length === 1
+            ? slicePanel(panels[0])
+            : L.box(
+                "column",
+                panels.map((axes) => L.withFlex(1, slicePanel(axes))),
+              ),
+        ),
+      ),
+    )(rootElement);
+  }
+
+  disposed() {
+    removeChildren(this.rootElement);
+    super.disposed();
+  }
+}
+
 export const LAYOUTS = new Map<
   string,
   {
@@ -694,6 +776,13 @@ export const LAYOUTS = new Map<
     },
   ],
 ]);
+
+for (const [name, arrangement] of THREE_PANEL_LAYOUTS) {
+  LAYOUTS.set(name, {
+    factory: (container, element, viewer) =>
+      new ThreePanelLayout(container, element, viewer, arrangement),
+  });
+}
 
 for (const axes of AXES_RELATIVE_ORIENTATION.keys()) {
   LAYOUTS.set(axes, {
