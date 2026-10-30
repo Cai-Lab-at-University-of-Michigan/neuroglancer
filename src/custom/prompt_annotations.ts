@@ -111,6 +111,29 @@ export function mouseInDataBounds(
   return true;
 }
 
+/**
+ * Where a prompt layer's dots live right now: the annotation source of the
+ * managed layer called `name`, read from the layer manager every time.
+ *
+ * It used to be remembered after the first lookup. The viewer rebuilds layers
+ * (it does while a Commit is being written), and a remembered source is then
+ * an object that is no longer on screen, so a prompt_clear emptied that one and
+ * left the dots people were looking at.
+ *
+ * Returns the source; null when the layer exists but its source is not ready;
+ * undefined when there is no layer of that name.
+ */
+export function findPromptSource(
+  managedLayers: Iterable<{ name: string; layer?: any }>,
+  name: string,
+): any {
+  for (const managedLayer of managedLayers) {
+    if (managedLayer.name !== name) continue;
+    return managedLayer.layer?.localAnnotations ?? null;
+  }
+  return undefined;
+}
+
 // [BUG-016] Build a Float32Array point in NG coordinate space order.
 // The coordinate space is not always x, y, z in that order, and a point built
 // positionally lands somewhere else entirely when it is not.

@@ -14,6 +14,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { AnnotationType } from "#src/annotation/index.js";
 import {
+  findPromptSource,
   makeAnnotationPoint,
   mouseInDataBounds,
   pointFromMouseState,
@@ -443,5 +444,43 @@ describe("the data-bounds gate asks about the pointer too", () => {
       ),
     ).toBe(false);
     expect(mouseInDataBounds({ unsnappedPosition: full }, {})).toBe(false);
+  });
+});
+
+describe("findPromptSource", () => {
+  const layer = (name: string, localAnnotations?: object) => ({
+    name,
+    layer: localAnnotations ? { localAnnotations } : {},
+  });
+
+  it("returns the source of the layer with that name", () => {
+    const source = {};
+    expect(
+      findPromptSource(
+        [layer("a"), layer("__seeds_pos", source)],
+        "__seeds_pos",
+      ),
+    ).toBe(source);
+  });
+
+  it("follows a layer that was rebuilt, not the source it had before", () => {
+    // The viewer rebuilds the prompt layers while a Commit is written. A source
+    // remembered from before is then a dead object: clearing it leaves the
+    // dots on screen. The lookup has to answer with what is in the manager now.
+    const before = {};
+    const after = {};
+    const layers = [layer("__seeds_pos", before)];
+    expect(findPromptSource(layers, "__seeds_pos")).toBe(before);
+
+    layers[0] = layer("__seeds_pos", after);
+    expect(findPromptSource(layers, "__seeds_pos")).toBe(after);
+  });
+
+  it("says null for a layer whose source is not ready, undefined for no layer", () => {
+    expect(findPromptSource([layer("__seeds_pos")], "__seeds_pos")).toBeNull();
+    expect(
+      findPromptSource([layer("other", {})], "__seeds_pos"),
+    ).toBeUndefined();
+    expect(findPromptSource([], "__seeds_pos")).toBeUndefined();
   });
 });

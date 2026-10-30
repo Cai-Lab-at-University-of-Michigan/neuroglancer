@@ -29,6 +29,7 @@ import type {
   StrokePoint,
 } from "#src/custom/prompt_annotations.js";
 import {
+  findPromptSource,
   isValidPoint,
   mouseInDataBounds,
   pointFromMouseState,
@@ -336,12 +337,6 @@ void main() {
 `;
 }
 
-const _promptSources: Record<SeedLayerKind, any> = {
-  pos: null,
-  neg: null,
-  pos_line: null,
-  neg_line: null,
-};
 const _promptLayerCreated: Record<SeedLayerKind, boolean> = {
   pos: false,
   neg: false,
@@ -351,7 +346,6 @@ const _promptLayerCreated: Record<SeedLayerKind, boolean> = {
 
 function resetPromptLayerCache() {
   for (const kind of SEED_LAYER_KINDS) {
-    _promptSources[kind] = null;
     _promptLayerCreated[kind] = false;
   }
 }
@@ -396,20 +390,15 @@ function armPromptLayerFade(viewer: any): void {
 
 function getPromptAnnotationSource(viewer: any, kind: SeedLayerKind): any {
   const spec = SEED_LAYERS[kind];
-  if (_promptSources[kind]) return _promptSources[kind];
   if (!viewer?.layerManager?.managedLayers) return null;
 
-  // Look for existing layer (may have been created but source not yet ready)
-  for (const managedLayer of viewer.layerManager.managedLayers) {
-    if (managedLayer.name === spec.name) {
-      const source = managedLayer.layer?.localAnnotations;
-      if (source) {
-        _promptSources[kind] = source;
-        return source;
-      }
-      return null;
-    }
-  }
+  // Look for the existing layer every time (it may have been created but its
+  // source not yet ready, or rebuilt since the last call).
+  const existing = findPromptSource(
+    viewer.layerManager.managedLayers,
+    spec.name,
+  );
+  if (existing !== undefined) return existing;
 
   // Create new annotation layer only once per kind
   if (_promptLayerCreated[kind]) return null;
