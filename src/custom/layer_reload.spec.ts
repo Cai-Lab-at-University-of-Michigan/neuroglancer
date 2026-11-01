@@ -1075,7 +1075,7 @@ describe("refreshes that overlap", () => {
       new DraftHider(viewer.layerManager),
       running,
     );
-    await vi.runAllTimersAsync();
+    await vi.advanceTimersByTimeAsync(100);
     await Promise.all([older, newer]);
 
     expect(s.refreshCache.mock.calls[0][0].aborted).toBe(true);
@@ -1087,6 +1087,121 @@ describe("refreshes that overlap", () => {
     expect(first.posted[0]).toMatchObject({ commitId: "older", ok: false });
     expect(second.posted[0]).toMatchObject({ commitId: "newer", ok: true });
     expect(queue.onScreen).toContain("newer replacement");
+  });
+});
+
+describe("what a cancelled or empty refresh says", () => {
+  it("asks the newer refresh's sources first and cancels the older refresh after, so the worker sees the newer one begin before it sees the cancel", async () => {
+    // The other way round, the cancelled refresh finds no newer one and drops
+    // every chunk it had not replaced, and the newer refresh then finds a
+    // layer with nothing on screen to refresh.
+    const calls: string[] = [];
+    const order: string[] = [];
+    const s = source("s");
+    s.refreshCache
+      .mockImplementationOnce(async (signal?: AbortSignal) => {
+        signal?.addEventListener("abort", () => order.push("older cancelled"));
+        return hang(signal);
+      })
+      .mockImplementation(async () => {
+        order.push("newer asked");
+        return {
+          refreshed: 1,
+          skipped: 0,
+          failed: 0,
+          fellBack: false,
+          superseded: false,
+        };
+      });
+    const { viewer } = fakeViewer(
+      [layer("committed")],
+      { committed: [[s]] },
+      calls,
+    );
+    const running = new RunningRefreshes();
+
+    const older = handleSoftInvalidate(
+      viewer,
+      { layerName: "committed", commitId: "older" },
+      env(calls).env,
+      new DraftHider(viewer.layerManager),
+      running,
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    const newer = handleSoftInvalidate(
+      viewer,
+      { layerName: "committed", commitId: "newer" },
+      env(calls).env,
+      new DraftHider(viewer.layerManager),
+      running,
+    );
+    await vi.advanceTimersByTimeAsync(100);
+    await Promise.all([older, newer]);
+
+    expect(order).toEqual(["newer asked", "older cancelled"]);
+  });
+
+  it("does not call a refresh ok when it was cancelled, even if the worker answered it as an ordinary result", async () => {
+    // the worker answers a cancelled refresh with what it had done: no failure
+    const calls: string[] = [];
+    const draft = layer("draft");
+    const s = source("s");
+    s.refreshCache.mockImplementation(async (signal?: AbortSignal) => {
+      await new Promise<void>((resolve) =>
+        signal?.addEventListener("abort", () => resolve()),
+      );
+      // some chunks were replaced before the cancel, so only the cancel makes it not ok
+      return {
+        refreshed: 2,
+        skipped: 4,
+        failed: 0,
+        fellBack: false,
+        superseded: false,
+      };
+    });
+    const { viewer } = fakeViewer(
+      [layer("committed"), draft],
+      { committed: [[s]] },
+      calls,
+    );
+    const running = new RunningRefreshes();
+    const { env: e, posted } = env(calls);
+
+    const older = handleSoftInvalidate(
+      viewer,
+      { layerName: "committed", commitId: "older", hideLayerName: "draft" },
+      e,
+      new DraftHider(viewer.layerManager),
+      running,
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    running.begin("committed", 60_000).cancelOlder();
+    await vi.advanceTimersByTimeAsync(100);
+    await older;
+
+    expect(posted[0]).toMatchObject({ ok: false, hidden: false });
+    expect(draft.visible).toBe(true);
+  });
+
+  it("does not call a refresh ok when it refreshed nothing: the layer had no chunk on screen, so hiding the draft would leave the stroke on nothing", async () => {
+    const calls: string[] = [];
+    const draft = layer("draft");
+    const { viewer } = fakeViewer(
+      [layer("committed"), draft],
+      { committed: [[source("a", { refreshed: 0, skipped: 0 })]] },
+      calls,
+    );
+    const { env: e, posted } = env(calls);
+
+    await handleSoftInvalidate(
+      viewer,
+      { layerName: "committed", commitId: "c1", hideLayerName: "draft" },
+      e,
+      new DraftHider(viewer.layerManager),
+    );
+
+    expect(posted[0]).toMatchObject({ ok: false, refreshed: 0, hidden: false });
+    expect(draft.visible).toBe(true);
   });
 });
 
@@ -1164,16 +1279,29 @@ describe("cancelling the reads of a refresh", () => {
 });
 
 describe("RunningRefreshes", () => {
-  it("cancels the older refresh of a layer when a newer one begins, and only that layer's", () => {
+  it("cancels the older refresh of a layer only when the newer one says so, and only that layer's", () => {
     const running = new RunningRefreshes();
     const first = running.begin("committed", 60_000);
     const other = running.begin("another", 60_000);
 
     const second = running.begin("committed", 60_000);
+    expect(first.signal.aborted, "cancelled before the newer one asked").toBe(
+      false,
+    );
+    second.cancelOlder();
 
     expect(first.signal.aborted).toBe(true);
     expect(other.signal.aborted).toBe(false);
     expect(second.signal.aborted).toBe(false);
+  });
+
+  it("has nothing to cancel for the first refresh of a layer", () => {
+    const running = new RunningRefreshes();
+    const first = running.begin("committed", 60_000);
+
+    first.cancelOlder();
+
+    expect(first.signal.aborted).toBe(false);
   });
 
   it("cancels at the hard limit and not before", () => {
@@ -1193,12 +1321,14 @@ describe("RunningRefreshes", () => {
     const second = running.begin("committed", 60_000);
 
     first.finish();
+    second.cancelOlder();
     expect(second.signal.aborted).toBe(false);
     second.finish();
 
     expect(vi.getTimerCount()).toBe(0);
     // nothing is left to cancel
     const third = running.begin("committed", 60_000);
+    third.cancelOlder();
     expect(third.signal.aborted).toBe(false);
     third.finish();
   });

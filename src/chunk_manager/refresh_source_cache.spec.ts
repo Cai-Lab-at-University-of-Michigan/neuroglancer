@@ -399,6 +399,38 @@ describe("ChunkQueueManager.refreshSourceCache", () => {
   });
 });
 
+describe("ChunkQueueManager.refreshSourceCache, cancelled for a newer refresh", () => {
+  it("leaves the chunks alone when the cancel comes after the newer refresh began, so the newer one finds them on screen", async () => {
+    const queue = makeQueue();
+    const older = new AbortController();
+    const a = chunk("a");
+    const b = chunk("b");
+    // the older refresh's reads hang until it is cancelled; the newer one's answer at once
+    let calls = 0;
+    const source = makeSource([a, b], (c, _attempt, signal) => {
+      calls++;
+      if (calls <= 2) return hang(signal);
+      return { key: c.key, empty: false, tag: "newer" };
+    });
+
+    const first = queue.refreshSourceCache(source, older.signal);
+    await vi.advanceTimersByTimeAsync(10);
+    const second = queue.refreshSourceCache(source, signal());
+    older.abort(new DOMException("cancelled", "AbortError"));
+    await vi.runAllTimersAsync();
+    const olderResult = await first;
+    const newerResult = await second;
+
+    expect(
+      queue.evicted,
+      "the cancelled refresh dropped what the newer one reads",
+    ).toEqual([]);
+    expect(olderResult).toMatchObject({ refreshed: 0, superseded: true });
+    expect(newerResult).toMatchObject({ refreshed: 2, superseded: false });
+    expect(queue.sent.sort()).toEqual(["a <- newer", "b <- newer"]);
+  });
+});
+
 describe("ChunkQueueManager.sendFreshChunk", () => {
   function sender() {
     const invoked: { name: string; msg: any; transfers: any[] }[] = [];

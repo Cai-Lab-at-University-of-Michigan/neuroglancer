@@ -182,11 +182,7 @@ export class RunningRefreshes {
   private running = new Map<string, AbortController>();
 
   begin(layerName: string, abortAfterMs: number) {
-    this.running
-      .get(layerName)
-      ?.abort(
-        new DOMException("a newer refresh of this layer started", "AbortError"),
-      );
+    const older = this.running.get(layerName);
     const controller = new AbortController();
     this.running.set(layerName, controller);
     const timer = setTimeout(() => {
@@ -196,6 +192,21 @@ export class RunningRefreshes {
     }, abortAfterMs);
     return {
       signal: controller.signal,
+      /**
+       * Cancels the refresh of this layer that was running when this one began.
+       * Call it once the reads of this refresh have been asked for: the worker
+       * then sees this refresh begin before it sees the older one cancelled,
+       * so the older one knows it was taken over and does not drop the chunks
+       * this one is about to read.
+       */
+      cancelOlder: () => {
+        older?.abort(
+          new DOMException(
+            "a newer refresh of this layer started",
+            "AbortError",
+          ),
+        );
+      },
       /** The reads are over: stop the limit, and forget this refresh. */
       finish: () => {
         clearTimeout(timer);
@@ -329,6 +340,9 @@ export async function handleSoftInvalidate(
           }
         }),
       );
+      // Every read of this refresh has been asked for, so the older refresh of
+      // the layer, if there is one, can go.
+      refresh.cancelOlder();
       const timeout = new Promise<void>((resolve) => {
         timer = setTimeout(() => {
           timedOut = true;
@@ -344,7 +358,11 @@ export async function handleSoftInvalidate(
       if (holding) viewer.chunkQueueManager.endRefreshHold();
     }
 
-    const ok = inPlace && !timedOut;
+    // Ok means the layer shows the new data: nothing failed or took too long,
+    // the refresh was not cancelled, and it replaced something. A refresh that
+    // replaced nothing found no chunk of the layer on screen, and hiding the
+    // draft would leave the stroke on nothing until the layer has loaded.
+    const ok = inPlace && !timedOut && !signal.aborted && refreshed > 0;
     if (ok && hideLayerName !== undefined && draft) {
       hidden = hider.hide(hideLayerName, draft);
     }
