@@ -17,6 +17,7 @@
 import { throttle } from "lodash-es";
 import type {
   ChunkSourceParametersConstructor,
+  ChunkSourceRefreshResult,
   LayerChunkProgressInfo,
 } from "#src/chunk_manager/base.js";
 import {
@@ -24,6 +25,7 @@ import {
   CHUNK_MANAGER_RPC_ID,
   CHUNK_QUEUE_MANAGER_RPC_ID,
   CHUNK_SOURCE_INVALIDATE_RPC_ID,
+  CHUNK_SOURCE_REFRESH_RPC_ID,
   ChunkDownloadStatistics,
   ChunkMemoryStatistics,
   ChunkPriorityTier,
@@ -34,6 +36,13 @@ import {
   numChunkStatistics,
   REQUEST_CHUNK_STATISTICS_RPC_ID,
 } from "#src/chunk_manager/base.js";
+import type { RefreshOps } from "#src/chunk_manager/soft_refresh.js";
+import {
+  pause,
+  planRefresh,
+  runRefresh,
+  Slots,
+} from "#src/chunk_manager/soft_refresh.js";
 import type { SharedWatchableValue } from "#src/shared_watchable_value.js";
 import type { TypedNumberArray } from "#src/util/array.js";
 import type { Borrowed, Disposable } from "#src/util/disposable.js";
@@ -47,7 +56,7 @@ import type {
 } from "#src/util/pairing_heap.js";
 import makePairingHeapOperations from "#src/util/pairing_heap.js";
 import { NullarySignal } from "#src/util/signal.js";
-import type { RPC } from "#src/worker_rpc.js";
+import type { RPC, RPCPromise } from "#src/worker_rpc.js";
 import {
   initializeSharedObjectCounterpart,
   registerPromiseRPC,
@@ -59,6 +68,34 @@ import {
 } from "#src/worker_rpc.js";
 
 const DEBUG_CHUNK_UPDATES = false;
+
+/**
+ * Reads in flight at once during soft refreshes, over all sources of a queue
+ * manager. The viewer's own downloads run up to 100 at a time and a refresh
+ * makes the same reads, so this only keeps one commit from taking every
+ * connection; a lower number made a slow link read the visible chunks in waves.
+ */
+const SOFT_REFRESH_CONCURRENCY = 16;
+
+/** Pause before a chunk that had data and came back empty is read a second time. */
+const SOFT_REFRESH_REREAD_DELAY_MS = 300;
+
+/**
+ * Implemented by chunk sources that can read a chunk again into an object that
+ * is not part of the cache, which is what `refreshSourceCache` needs to
+ * replace a chunk on screen only once its new data is here.
+ */
+export interface FreshReadSource {
+  readFresh(chunk: Chunk, signal: AbortSignal): Promise<Chunk>;
+  isFreshEmpty(fresh: Chunk): boolean;
+  freshBytes(fresh: Chunk): number;
+}
+
+function canReadFresh(
+  source: ChunkSourceBase,
+): source is ChunkSourceBase & FreshReadSource {
+  return typeof (source as Partial<FreshReadSource>).readFresh === "function";
+}
 
 export interface ChunkStateListener {
   (chunk: Chunk, oldState: ChunkState): void;
@@ -731,6 +768,12 @@ export class ChunkQueueManager extends SharedObjectCounterpart {
   private numFailed = 0;
   private gpuMemoryGeneration = 0;
 
+  /** Reads in flight during soft refreshes, shared by all the sources of this queue. */
+  private refreshSlots = new Slots(SOFT_REFRESH_CONCURRENCY);
+
+  /** The newest refresh of each source; an older one steps aside for it. */
+  private refreshGenerations = new WeakMap<ChunkSourceBase, number>();
+
   constructor(rpc: RPC, options: any) {
     super(rpc, options);
     const getCapacity = (capacity: any) => {
@@ -1126,6 +1169,144 @@ export class ChunkQueueManager extends SharedObjectCounterpart {
     this.rpc!.invoke("Chunk.update", { source: source.rpcId });
     this.scheduleUpdate();
   }
+
+  /**
+   * Drops a chunk's data wherever it is held and queues the chunk to be read
+   * again. The same steps as `evict` in `processQueuePromotions_`.
+   */
+  private evictChunk(chunk: Chunk) {
+    switch (chunk.state) {
+      case ChunkState.DOWNLOADING:
+        cancelChunkDownload(chunk);
+        break;
+      case ChunkState.GPU_MEMORY:
+        this.freeChunkGPUMemory(chunk);
+      // fallthrough
+      case ChunkState.SYSTEM_MEMORY_WORKER:
+      case ChunkState.SYSTEM_MEMORY:
+        this.freeChunkSystemMemory(chunk);
+        break;
+    }
+    // Note: After calling this, chunk may no longer be valid.
+    this.updateChunkState(chunk, ChunkState.QUEUED);
+  }
+
+  /**
+   * Hands `fresh`, a chunk read just now under the same key as `chunk`, to the
+   * frontend, which replaces the chunk it holds for that key. `chunk` stays
+   * where it is in the queues and in the same state; it only takes on the size
+   * of the new data.
+   */
+  private sendFreshChunk(chunk: Chunk, fresh: Chunk, bytes: number) {
+    chunk.systemMemoryBytes = bytes;
+    chunk.gpuMemoryBytes = bytes;
+    ++this.gpuMemoryGeneration;
+    const msg: any = {};
+    const transfers: any[] = [];
+    fresh.serialize(msg, transfers);
+    msg.state = ChunkState.GPU_MEMORY;
+    // Lets the frontend keep the replacement back while the page holds them.
+    msg.refresh = true;
+    this.rpc!.invoke("Chunk.update", msg, transfers);
+    this.scheduleUpdate();
+  }
+
+  /**
+   * Reads the chunks of `source` again WITHOUT emptying it (see
+   * `soft_refresh.ts`): a chunk on screen stays until its new data has been
+   * read, and is then replaced in one step, while every other chunk is
+   * dropped the way `invalidateSourceCache` drops it. A source that cannot
+   * read a chunk into a spare object is invalidated as a whole.
+   */
+  async refreshSourceCache(
+    source: ChunkSourceBase,
+    signal: AbortSignal,
+  ): Promise<ChunkSourceRefreshResult> {
+    if (!canReadFresh(source)) {
+      this.invalidateSourceCache(source as ChunkSource);
+      return {
+        refreshed: 0,
+        skipped: 0,
+        failed: 0,
+        fellBack: true,
+        superseded: false,
+      };
+    }
+    const generation = (this.refreshGenerations.get(source) ?? 0) + 1;
+    this.refreshGenerations.set(source, generation);
+    const plan = planRefresh(source.chunks.values());
+    for (const chunk of plan.evict) {
+      this.evictChunk(chunk);
+    }
+    // Chunk objects are recycled, so a chunk is only the one planned while it
+    // still has the key it had then.
+    const keys = new Map<Chunk, string>();
+    for (const chunk of plan.refresh) {
+      keys.set(chunk, chunk.key!);
+    }
+    const settled = new Set<Chunk>();
+    const isCurrent = (chunk: Chunk) =>
+      this.refreshGenerations.get(source) === generation &&
+      chunk.state === ChunkState.GPU_MEMORY &&
+      chunk.key === keys.get(chunk) &&
+      source.chunks.get(chunk.key!) === chunk;
+    const ops: RefreshOps<Chunk, Chunk> = {
+      readFresh: async (chunk, signal) => {
+        const release = await this.refreshSlots.acquire(signal);
+        try {
+          return await source.readFresh(chunk, signal);
+        } finally {
+          release();
+        }
+      },
+      isEmpty: (fresh) => source.isFreshEmpty(fresh),
+      hadData: (chunk) => chunk.gpuMemoryBytes > 0,
+      isCurrent,
+      swap: (chunk, fresh) => {
+        this.sendFreshChunk(chunk, fresh, source.freshBytes(fresh));
+        settled.add(chunk);
+      },
+      fallBack: (chunk) => {
+        this.evictChunk(chunk);
+        settled.add(chunk);
+      },
+      wait: pause,
+    };
+    try {
+      const outcome = await runRefresh(plan.refresh, ops, {
+        signal,
+        concurrency: SOFT_REFRESH_CONCURRENCY,
+        rereadDelayMs: SOFT_REFRESH_REREAD_DELAY_MS,
+      });
+      return {
+        ...outcome,
+        fellBack: false,
+        superseded: this.refreshGenerations.get(source) !== generation,
+      };
+    } finally {
+      // A chunk that was to be replaced and was not (cancelled, moved out of
+      // GPU memory by the cache) must not keep its old data: drop it, so the
+      // normal queue reads it from scratch. A newer refresh of the same
+      // source covers these chunks itself.
+      if (this.refreshGenerations.get(source) === generation) {
+        for (const chunk of plan.refresh) {
+          if (
+            settled.has(chunk) ||
+            chunk.key !== keys.get(chunk) ||
+            source.chunks.get(chunk.key!) !== chunk
+          ) {
+            continue;
+          }
+          switch (chunk.state) {
+            case ChunkState.GPU_MEMORY:
+            case ChunkState.SYSTEM_MEMORY:
+            case ChunkState.SYSTEM_MEMORY_WORKER:
+              this.evictChunk(chunk);
+          }
+        }
+      }
+    }
+  }
 }
 
 export class ChunkRenderLayerBackend
@@ -1377,6 +1558,18 @@ registerRPC(CHUNK_SOURCE_INVALIDATE_RPC_ID, function (x) {
   const source = <ChunkSource>this.get(x.id);
   source.chunkManager.queueManager.invalidateSourceCache(source);
 });
+
+registerPromiseRPC(
+  CHUNK_SOURCE_REFRESH_RPC_ID,
+  async function (x, { signal }): RPCPromise<ChunkSourceRefreshResult> {
+    const source = <ChunkSource>this.get(x.source);
+    const value = await source.chunkManager.queueManager.refreshSourceCache(
+      source,
+      signal!,
+    );
+    return { value };
+  },
+);
 
 registerPromiseRPC(
   REQUEST_CHUNK_STATISTICS_RPC_ID,

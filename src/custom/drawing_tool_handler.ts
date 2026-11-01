@@ -3,6 +3,14 @@ import {
   sliceFadeSlices,
 } from "#src/annotation/slice_fade.js";
 import type { DrawingTool } from "#src/custom/drawing_tool.js";
+import type { ViewerLike } from "#src/custom/layer_reload.js";
+import {
+  DraftHider,
+  pageEnv,
+  RunningRefreshes,
+  softInvalidateRequest,
+  startSoftInvalidate,
+} from "#src/custom/layer_reload.js";
 import { initMinimap, getMinimap } from "#src/custom/minimap.js";
 import {
   DATA_PANEL_SELECTOR,
@@ -590,6 +598,8 @@ function sendBuildInfo(parent: Window) {
 export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
   const { canvas, ctx, viewer } = drawingTool;
   const container = viewer.display.container as HTMLElement;
+  const draftHider = new DraftHider(viewer.layerManager);
+  const softRefreshes = new RunningRefreshes();
 
   // Viewport channel — parent asks for the crosshair position so the
   // ECDF endpoint can localize histogram sampling to the region the
@@ -1071,6 +1081,25 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
     if (type === "invalidate_chunks") {
       const layerId = event.data.layerId;
       const reloadLayer = event.data.reloadLayer === true;
+
+      // A commit asks for the soft form (see layer_reload.ts): the one layer is
+      // read again without being emptied, the draft is hidden once the layer
+      // shows the new data, and the page is told with layer_reloaded. A message
+      // without the commit's fields takes the invalidation below, as before,
+      // and so does one whose layer no slice view draws under that name.
+      const softRequest = softInvalidateRequest(event.data);
+      if (
+        softRequest !== undefined &&
+        startSoftInvalidate(
+          viewer as unknown as ViewerLike,
+          softRequest,
+          pageEnv(),
+          draftHider,
+          softRefreshes,
+        )
+      ) {
+        return;
+      }
 
       // If reloadLayer is requested with a layerId, reload the layer to refetch /info
       // This is needed for virtual stitching where tile offsets change

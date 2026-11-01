@@ -16,6 +16,7 @@
 
 import type {
   ChunkSourceParametersConstructor,
+  ChunkSourceRefreshResult,
   LayerChunkProgressInfo,
 } from "#src/chunk_manager/base.js";
 import {
@@ -23,9 +24,11 @@ import {
   CHUNK_MANAGER_RPC_ID,
   CHUNK_QUEUE_MANAGER_RPC_ID,
   CHUNK_SOURCE_INVALIDATE_RPC_ID,
+  CHUNK_SOURCE_REFRESH_RPC_ID,
   ChunkState,
   REQUEST_CHUNK_STATISTICS_RPC_ID,
 } from "#src/chunk_manager/base.js";
+import { putChunk, UpdateHold } from "#src/chunk_manager/soft_refresh.js";
 import { SharedWatchableValue } from "#src/shared_watchable_value.js";
 import { TrackableBoolean } from "#src/trackable_boolean.js";
 import { TrackableValue } from "#src/trackable_value.js";
@@ -109,6 +112,9 @@ export class ChunkQueueManager extends SharedObject {
   chunkUpdateDeadline: number | null = null;
 
   chunkUpdateDelay = 30;
+
+  /** Keeps the replacements of a soft refresh back until `endRefreshHold`. */
+  private refreshHold = new UpdateHold<ChunkSource, any>();
 
   enablePrefetch = new TrackableBoolean(true, true);
 
@@ -258,7 +264,9 @@ export class ChunkQueueManager extends SharedObject {
         const key = update.id;
         if (update.new) {
           chunk = source.getChunk(update);
-          source.addChunk(key, chunk);
+          // A soft refresh sends a new chunk for a key that is on screen; the
+          // old one is deleted first so that its GPU memory is freed.
+          putChunk(source, key, chunk);
         } else {
           chunk = source.chunks.get(key)!;
         }
@@ -301,6 +309,35 @@ export class ChunkQueueManager extends SharedObject {
     return this.processPendingChunkUpdates(true);
   }
 
+  /**
+   * From now on the replacements a soft refresh sends (see
+   * `ChunkSource.refreshCache`) are kept back, so that they can be put on
+   * screen together. Every call needs an `endRefreshHold`.
+   */
+  beginRefreshHold() {
+    this.refreshHold.begin();
+  }
+
+  /** Whether `update` is kept back by a refresh hold. */
+  holdUpdate(source: ChunkSource, update: any) {
+    return this.refreshHold.keep(source, update);
+  }
+
+  /**
+   * Ends a refresh hold. The replacements kept back so far are applied
+   * together with everything else that is waiting, now, also when another
+   * refresh is still holding (what it sends later is kept until its own end).
+   */
+  endRefreshHold(): number {
+    for (const update of this.refreshHold.end()) {
+      // The source may have been removed while the update was kept back.
+      if (this.rpc!.get(update.source) !== undefined) {
+        updateChunk(this.rpc!, update);
+      }
+    }
+    return this.flushPendingChunkUpdates();
+  }
+
   async getStatistics(): Promise<Map<ChunkSource, Float64Array>> {
     const rpc = this.rpc!;
     const rawData = await rpc.promiseInvoke<Map<number, Float64Array>>(
@@ -326,6 +363,7 @@ function updateChunk(rpc: RPC, x: any) {
     );
   }
   const queueManager = source.chunkManager.chunkQueueManager;
+  if (queueManager.holdUpdate(source, x)) return;
   if (source.immediateChunkUpdates) {
     if (queueManager.applyChunkUpdate(x)) {
       queueManager.visibleChunksChanged.dispatch();
@@ -479,6 +517,23 @@ export class ChunkSource extends SharedObject {
    */
   invalidateCache(): void {
     this.rpc!.invoke(CHUNK_SOURCE_INVALIDATE_RPC_ID, { id: this.rpcId });
+  }
+
+  /**
+   * Reads the chunks of this source again WITHOUT emptying it: a chunk that is
+   * on screen stays until its new data has arrived, and is then replaced in
+   * one step (see `soft_refresh.ts`). Resolves when every chunk has been
+   * replaced or dropped; the replacements are queued here by then, and
+   * `flushPendingChunkUpdates` puts them on screen. Aborting `signal` cancels
+   * the reads that are still out, and rejects the promise.
+   */
+  refreshCache(signal?: AbortSignal): Promise<ChunkSourceRefreshResult> {
+    // `source`, not `id`: promiseInvoke overwrites `id` with the promise's own.
+    return this.rpc!.promiseInvoke<ChunkSourceRefreshResult>(
+      CHUNK_SOURCE_REFRESH_RPC_ID,
+      { source: this.rpcId },
+      { signal },
+    );
   }
 
   static encodeOptions(_options: object): { [key: string]: any } {
