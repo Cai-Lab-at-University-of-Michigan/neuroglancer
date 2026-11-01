@@ -198,8 +198,19 @@ export function putChunk<C>(cache: ChunkCache<C>, key: string, chunk: C) {
  * of the same source, so that the updates of a source are applied in the order
  * the worker sent them: a replacement followed by an eviction of the same
  * chunk must not be applied the other way round.
+ *
+ * The answer of a refresh says its replacements are on screen, so every end
+ * gives back everything kept so far, even while another refresh is still
+ * holding: waiting for the last hold would leave the first refresh's chunks
+ * off the screen, behind an answer that says they are on it, for as long as
+ * the second one takes (and for ever if refreshes keep overlapping). What the
+ * other refresh had already sent is shown a little early; what it sends later
+ * is kept again until its own end.
  */
-export class UpdateHold<S, U extends { refresh?: boolean }> {
+export class UpdateHold<
+  S,
+  U extends { refresh?: boolean; released?: boolean },
+> {
   private holds = 0;
   private held: U[] = [];
   private heldSources = new Set<S>();
@@ -208,22 +219,29 @@ export class UpdateHold<S, U extends { refresh?: boolean }> {
     ++this.holds;
   }
 
-  /** Whether `update` was kept; if not, it is applied as usual. */
+  /**
+   * Whether `update` was kept; if not, it is applied as usual. An update that
+   * `end` gave back is never kept again: the frontend feeds those through the
+   * entry the new ones come in by, while another hold may still be active.
+   */
   keep(source: S, update: U): boolean {
-    if (this.holds === 0) return false;
+    if (this.holds === 0 || update.released === true) return false;
     if (update.refresh !== true && !this.heldSources.has(source)) return false;
     this.heldSources.add(source);
     this.held.push(update);
     return true;
   }
 
-  /** Ends one hold. The last one gives back the kept updates, in the order they arrived. */
+  /** Ends one hold, and gives back what has been kept so far, in the order it arrived. */
   end(): U[] {
     if (this.holds === 0) return [];
-    if (--this.holds > 0) return [];
+    --this.holds;
     const held = this.held;
     this.held = [];
     this.heldSources.clear();
+    for (const update of held) {
+      update.released = true;
+    }
     return held;
   }
 }

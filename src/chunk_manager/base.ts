@@ -112,6 +112,8 @@ export interface ChunkSourceRefreshResult {
   failed: number;
   /** The source cannot be refreshed in place, so it was invalidated the old way. */
   fellBack: boolean;
+  /** A newer refresh of the same source started, and took over the chunks this one had not replaced. */
+  superseded: boolean;
 }
 
 export const REQUEST_CHUNK_STATISTICS_RPC_ID =

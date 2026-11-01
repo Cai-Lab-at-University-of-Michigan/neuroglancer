@@ -324,8 +324,9 @@ export class ChunkQueueManager extends SharedObject {
   }
 
   /**
-   * Ends a refresh hold. When it is the last one, the replacements kept back
-   * are applied together with everything else that is waiting, now.
+   * Ends a refresh hold. The replacements kept back so far are applied
+   * together with everything else that is waiting, now, also when another
+   * refresh is still holding (what it sends later is kept until its own end).
    */
   endRefreshHold(): number {
     for (const update of this.refreshHold.end()) {
@@ -523,13 +524,15 @@ export class ChunkSource extends SharedObject {
    * on screen stays until its new data has arrived, and is then replaced in
    * one step (see `soft_refresh.ts`). Resolves when every chunk has been
    * replaced or dropped; the replacements are queued here by then, and
-   * `flushPendingChunkUpdates` puts them on screen.
+   * `flushPendingChunkUpdates` puts them on screen. Aborting `signal` cancels
+   * the reads that are still out, and rejects the promise.
    */
-  refreshCache(): Promise<ChunkSourceRefreshResult> {
+  refreshCache(signal?: AbortSignal): Promise<ChunkSourceRefreshResult> {
     // `source`, not `id`: promiseInvoke overwrites `id` with the promise's own.
     return this.rpc!.promiseInvoke<ChunkSourceRefreshResult>(
       CHUNK_SOURCE_REFRESH_RPC_ID,
       { source: this.rpcId },
+      { signal },
     );
   }
 

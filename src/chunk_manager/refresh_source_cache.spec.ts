@@ -29,8 +29,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ChunkQueueManager } from "#src/chunk_manager/backend.js";
-import { ChunkPriorityTier, ChunkState } from "#src/chunk_manager/base.js";
+import {
+  CHUNK_SOURCE_REFRESH_RPC_ID,
+  ChunkPriorityTier,
+  ChunkState,
+} from "#src/chunk_manager/base.js";
 import { Slots } from "#src/chunk_manager/soft_refresh.js";
+import { RPC } from "#src/worker_rpc.js";
 
 type FakeChunk = {
   key: string;
@@ -160,6 +165,7 @@ describe("ChunkQueueManager.refreshSourceCache", () => {
       skipped: 0,
       failed: 0,
       fellBack: false,
+      superseded: false,
     });
   });
 
@@ -197,6 +203,7 @@ describe("ChunkQueueManager.refreshSourceCache", () => {
       skipped: 0,
       failed: 0,
       fellBack: true,
+      superseded: false,
     });
   });
 
@@ -374,13 +381,16 @@ describe("ChunkQueueManager.refreshSourceCache", () => {
     await vi.advanceTimersByTimeAsync(10);
     const newer = queue.refreshSourceCache(source, signal());
     await vi.runAllTimersAsync();
-    await newer;
+    const newerResult = await newer;
     olderReads.forEach((resolve) =>
       resolve({ key: "x", empty: false, tag: "older" }),
     );
     await vi.runAllTimersAsync();
-    await older;
+    const olderResult = await older;
 
+    // the older answer says so, so that the page does not take it for a refresh that worked
+    expect(olderResult).toMatchObject({ refreshed: 0, superseded: true });
+    expect(newerResult).toMatchObject({ refreshed: 2, superseded: false });
     expect(queue.sent.sort()).toEqual(["a <- newer", "b <- newer"]);
     expect(
       queue.evicted,
@@ -439,5 +449,132 @@ describe("ChunkQueueManager.sendFreshChunk", () => {
     expect(old).toEqual({ systemMemoryBytes: 64, gpuMemoryBytes: 64 });
     expect(queue.gpuMemoryGeneration).toBe(1);
     expect(queue.scheduleUpdate).toHaveBeenCalled();
+  });
+});
+
+describe("ChunkQueueManager.evictChunk", () => {
+  function evictor() {
+    const calls: string[] = [];
+    const queue = Object.create(ChunkQueueManager.prototype) as any;
+    queue.freeChunkGPUMemory = vi.fn(() => calls.push("free GPU memory"));
+    queue.freeChunkSystemMemory = vi.fn(() => calls.push("free system memory"));
+    queue.updateChunkState = vi.fn((_chunk: unknown, state: ChunkState) =>
+      calls.push(`state ${ChunkState[state]}`),
+    );
+    return { queue, calls };
+  }
+
+  it.each([
+    [
+      ChunkState.GPU_MEMORY,
+      ["free GPU memory", "free system memory", "state QUEUED"],
+    ],
+    [ChunkState.SYSTEM_MEMORY, ["free system memory", "state QUEUED"]],
+    [ChunkState.SYSTEM_MEMORY_WORKER, ["free system memory", "state QUEUED"]],
+    [ChunkState.QUEUED, ["state QUEUED"]],
+    [ChunkState.FAILED, ["state QUEUED"]],
+  ])(
+    "drops a chunk in state %s the way the queue's own eviction does",
+    (state, expected) => {
+      const { queue, calls } = evictor();
+
+      queue.evictChunk({ state });
+
+      expect(calls).toEqual(expected);
+    },
+  );
+
+  it("cancels a download that is running, then queues the chunk again", () => {
+    const { queue, calls } = evictor();
+    const download = new AbortController();
+    const chunk = {
+      state: ChunkState.DOWNLOADING,
+      downloadAbortController: download,
+    };
+
+    queue.evictChunk(chunk);
+
+    expect(download.signal.aborted).toBe(true);
+    expect(chunk.downloadAbortController).toBeUndefined();
+    expect(calls).toEqual(["state QUEUED"]);
+  });
+});
+
+describe("the ChunkSource.refresh message", () => {
+  const result = {
+    refreshed: 3,
+    skipped: 0,
+    failed: 0,
+    fellBack: false,
+    superseded: false,
+  };
+
+  function connect(
+    refreshSourceCache: (
+      source: unknown,
+      signal: AbortSignal,
+    ) => Promise<unknown>,
+  ) {
+    const target = { postMessage: vi.fn(), onmessage: null as any };
+    const rpc = new RPC(target, false);
+    const source = {
+      chunkManager: {
+        queueManager: { refreshSourceCache: vi.fn(refreshSourceCache) },
+      },
+    };
+    rpc.set(5, source);
+    const send = (message: object) => target.onmessage({ data: message });
+    const replies = () => target.postMessage.mock.calls.map((call) => call[0]);
+    return { source, send, replies };
+  }
+
+  it("runs the queue manager's refresh of that source and answers with its result", async () => {
+    const { source, send, replies } = connect(async () => result);
+
+    send({ functionName: CHUNK_SOURCE_REFRESH_RPC_ID, id: 77, source: 5 });
+    await vi.runAllTimersAsync();
+
+    expect(
+      source.chunkManager.queueManager.refreshSourceCache,
+    ).toHaveBeenCalledWith(source, expect.any(AbortSignal));
+    expect(replies()).toEqual([
+      expect.objectContaining({
+        functionName: "rpc.promise.response",
+        id: 77,
+        value: result,
+      }),
+    ]);
+  });
+
+  it("cancels the refresh when the page cancels the call", async () => {
+    let seen: AbortSignal | undefined;
+    const { send } = connect(
+      (_source, signal) =>
+        new Promise((_resolve, reject) => {
+          seen = signal;
+          signal.addEventListener("abort", () => reject(signal.reason));
+        }),
+    );
+
+    send({ functionName: CHUNK_SOURCE_REFRESH_RPC_ID, id: 77, source: 5 });
+    await vi.runAllTimersAsync();
+    expect(seen?.aborted).toBe(false);
+    send({ functionName: "rpc.promise.cancel", id: 77 });
+    await vi.runAllTimersAsync();
+
+    expect(seen?.aborted).toBe(true);
+  });
+
+  it("answers with the error when the refresh throws", async () => {
+    const { send, replies } = connect(async () => {
+      throw new Error("no queue");
+    });
+
+    send({ functionName: CHUNK_SOURCE_REFRESH_RPC_ID, id: 78, source: 5 });
+    await vi.runAllTimersAsync();
+
+    expect(replies()).toEqual([
+      expect.objectContaining({ id: 78, error: expect.any(Error) }),
+    ]);
   });
 });

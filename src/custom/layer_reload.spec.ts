@@ -24,14 +24,18 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { UpdateHold } from "#src/chunk_manager/soft_refresh.js";
 import {
   DraftHider,
   type LayerLike,
+  RunningRefreshes,
   type RefreshReply,
   type RefreshResult,
   type ViewerLike,
   findLayerSources,
   handleSoftInvalidate,
+  softInvalidateRequest,
+  startSoftInvalidate,
 } from "#src/custom/layer_reload.js";
 
 function layer(name: string, visible = true): LayerLike {
@@ -51,21 +55,31 @@ type FakeSource = {
   invalidateCache: ReturnType<typeof vi.fn>;
 };
 
+/** A read that never answers, and fails when it is cancelled, as the real call does. */
+const hang = (signal?: AbortSignal) =>
+  new Promise<RefreshResult>((_resolve, reject) => {
+    signal?.addEventListener("abort", () => reject(signal.reason), {
+      once: true,
+    });
+  });
+
 function source(
   id: string,
-  answer: Partial<RefreshResult> | Error | "never" = {},
+  answer: Partial<RefreshResult> | Error | "never" | "hang" = {},
 ): FakeSource {
   return {
     id,
     invalidateCache: vi.fn(),
-    refreshCache: vi.fn(async () => {
+    refreshCache: vi.fn(async (signal?: AbortSignal) => {
       if (answer === "never") return new Promise<RefreshResult>(() => {});
+      if (answer === "hang") return hang(signal);
       if (answer instanceof Error) throw answer;
       return {
         refreshed: 2,
         skipped: 0,
         failed: 0,
         fellBack: false,
+        superseded: false,
         ...answer,
       };
     }),
@@ -132,7 +146,7 @@ function fakeViewer(
   };
 }
 
-function env(calls: string[], timeoutMs = 1000) {
+function env(calls: string[], timeoutMs = 1000, abortAfterMs = 60_000) {
   const posted: RefreshReply[] = [];
   return {
     posted,
@@ -145,6 +159,7 @@ function env(calls: string[], timeoutMs = 1000) {
         calls.push("frames");
       },
       timeoutMs,
+      abortAfterMs,
     },
   };
 }
@@ -366,7 +381,7 @@ describe("handleSoftInvalidate", () => {
     expect(draft.visible).toBe(true);
   });
 
-  it("is a plain success for a layer that is not in the viewer, and hides nothing", async () => {
+  it("is not ok for a layer that is not in the viewer: nothing was refreshed, and the draft is all that shows the stroke", async () => {
     const calls: string[] = [];
     const draft = layer("draft");
     const { viewer } = fakeViewer([draft], {}, calls);
@@ -379,10 +394,10 @@ describe("handleSoftInvalidate", () => {
       new DraftHider(viewer.layerManager),
     );
 
-    expect(posted[0]).toMatchObject({ ok: true, refreshed: 0, hidden: false });
-    expect(draft.visible, "the draft is all there is to show the stroke").toBe(
-      true,
-    );
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({ ok: false, refreshed: 0, hidden: false });
+    expect(draft.visible).toBe(true);
+    expect(viewer.chunkQueueManager.beginRefreshHold).not.toHaveBeenCalled();
   });
 
   it("hides nothing when no draft layer is named, or none exists", async () => {
@@ -648,6 +663,43 @@ describe("DraftHider", () => {
     expect(draft.visible).toBe(true);
   });
 
+  it("survives the page's state sync, which removes every layer and adds them all again", () => {
+    // What really happens in SAVAII when the page releases the hold: the viewer
+    // restores a state in which the draft is a new, empty layer, and does it
+    // by clearing the layer list and adding every layer again.
+    const old = layer("draft");
+    const layers: LayerLike[] = [layer("committed"), old];
+    const { viewer, fireLayersChanged } = fakeViewer(layers, {});
+    const hider = new DraftHider(viewer.layerManager, 20_000);
+    hider.hide("draft");
+
+    layers.length = 0;
+    fireLayersChanged();
+    const replacement = layer("draft");
+    const setVisible = vi.spyOn(replacement, "setVisible");
+    layers.push(layer("committed"), replacement);
+    fireLayersChanged();
+    vi.advanceTimersByTime(60_000);
+
+    // the old record is gone: no timer shows or hides anything afterwards
+    expect(vi.getTimerCount()).toBe(0);
+    expect(replacement.visible).toBe(true);
+    expect(setVisible).not.toHaveBeenCalled();
+    expect(old.visible, "the layer that left was shown again").toBe(false);
+  });
+
+  it("shows the same layer after the safety time when nothing rebuilds the layers", () => {
+    // the other case the timer is for: a page that never ends the hold
+    const draft = layer("draft");
+    const { viewer } = fakeViewer([layer("committed"), draft], {});
+    const hider = new DraftHider(viewer.layerManager, 20_000);
+    hider.hide("draft");
+
+    vi.advanceTimersByTime(20_001);
+
+    expect(draft.visible).toBe(true);
+  });
+
   it("stops listening and drops its timers when it is disposed", () => {
     const draft = layer("draft");
     const { viewer } = fakeViewer([draft], {});
@@ -658,5 +710,496 @@ describe("DraftHider", () => {
     vi.advanceTimersByTime(60_000);
 
     expect(draft.visible).toBe(false);
+  });
+});
+
+describe("softInvalidateRequest", () => {
+  it("reads the fields of a soft invalidate_chunks message", () => {
+    expect(
+      softInvalidateRequest({
+        type: "invalidate_chunks",
+        soft: true,
+        layerName: "committed",
+        commitId: "c1",
+        hideLayerName: "draft",
+        layerId: "not needed",
+      }),
+    ).toEqual({
+      layerName: "committed",
+      commitId: "c1",
+      hideLayerName: "draft",
+    });
+  });
+
+  it("leaves out a draft name that is not a string", () => {
+    expect(
+      softInvalidateRequest({
+        soft: true,
+        layerName: "committed",
+        commitId: "c1",
+        hideLayerName: 5,
+      }),
+    ).toEqual({ layerName: "committed", commitId: "c1" });
+  });
+
+  it.each([
+    ["is not soft", { layerName: "committed", commitId: "c1" }],
+    [
+      "says soft but not true",
+      { soft: "yes", layerName: "committed", commitId: "c1" },
+    ],
+    ["names no layer", { soft: true, commitId: "c1" }],
+    ["names no commit", { soft: true, layerName: "committed" }],
+    ["is empty", undefined],
+  ])(
+    "is nothing for a message that %s: the old invalidation takes it",
+    (_why, data) => {
+      expect(softInvalidateRequest(data)).toBeUndefined();
+    },
+  );
+});
+
+describe("startSoftInvalidate", () => {
+  it("declines a layer with no source in the viewer, tells the page it got no refresh, and leaves the whole-layer invalidation to the caller", () => {
+    // the layer was renamed in the viewer, or the scene gave it a " (2)" suffix: no source has its name
+    const calls: string[] = [];
+    const { viewer } = fakeViewer(
+      [layer("committed (2)"), layer("draft")],
+      { "committed (2)": [[source("o")]] },
+      calls,
+    );
+    const { env: e, posted } = env(calls);
+
+    const started = startSoftInvalidate(
+      viewer,
+      { layerName: "committed", commitId: "c1", hideLayerName: "draft" },
+      e,
+      new DraftHider(viewer.layerManager),
+    );
+
+    expect(started).toBe(false);
+    expect(posted).toEqual([
+      {
+        type: "layer_reloaded",
+        layerName: "committed",
+        commitId: "c1",
+        ok: false,
+        refreshed: 0,
+        failed: 0,
+        timedOut: false,
+        hidden: false,
+      },
+    ]);
+    expect(viewer.chunkQueueManager.beginRefreshHold).not.toHaveBeenCalled();
+  });
+
+  it("starts the refresh of a layer that has a source, and answers when it is done", async () => {
+    const calls: string[] = [];
+    const a = source("a");
+    const { viewer } = fakeViewer(
+      [layer("committed")],
+      { committed: [[a]] },
+      calls,
+    );
+    const { env: e, posted } = env(calls);
+
+    const started = startSoftInvalidate(
+      viewer,
+      { layerName: "committed", commitId: "c1" },
+      e,
+      new DraftHider(viewer.layerManager),
+    );
+    await vi.runAllTimersAsync();
+
+    expect(started).toBe(true);
+    expect(a.refreshCache).toHaveBeenCalledTimes(1);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({ ok: true });
+  });
+});
+
+describe("one answer for every message", () => {
+  const message = {
+    layerName: "committed",
+    commitId: "c1",
+    hideLayerName: "draft",
+  };
+
+  async function run(
+    breakIt: (parts: {
+      viewer: ViewerLike;
+      draft: LayerLike;
+      e: ReturnType<typeof env>["env"];
+    }) => void,
+  ) {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const calls: string[] = [];
+    const draft = layer("draft");
+    const { viewer } = fakeViewer(
+      [layer("committed"), draft],
+      { committed: [[source("a")]] },
+      calls,
+    );
+    const { env: e, posted } = env(calls);
+    breakIt({ viewer, draft, e });
+    await handleSoftInvalidate(
+      viewer,
+      message,
+      e,
+      new DraftHider(viewer.layerManager),
+    );
+    return { viewer, posted };
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("answers not ok, once, when the hold cannot be started", async () => {
+    const { viewer, posted } = await run(({ viewer }) => {
+      viewer.chunkQueueManager.beginRefreshHold = vi.fn(() => {
+        throw new Error("no queue manager");
+      });
+    });
+
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({ ok: false, hidden: false });
+    // a hold that never began is not ended
+    expect(viewer.chunkQueueManager.endRefreshHold).not.toHaveBeenCalled();
+  });
+
+  it("answers not ok, once, when the replacements cannot be put on screen", async () => {
+    const { posted } = await run(({ viewer }) => {
+      viewer.chunkQueueManager.endRefreshHold = vi.fn(() => {
+        throw new Error("a chunk update failed");
+      });
+    });
+
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({ ok: false });
+  });
+
+  it("answers not ok, once, when the redraw fails", async () => {
+    const { posted } = await run(({ viewer }) => {
+      viewer.display.scheduleRedraw = vi.fn(() => {
+        throw new Error("no display");
+      });
+    });
+
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({ ok: false });
+  });
+
+  it("answers not ok, once, when the frames cannot be waited for", async () => {
+    const { posted } = await run(({ e }) => {
+      e.frames = async () => {
+        throw new Error("no frames");
+      };
+    });
+
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({ ok: false });
+  });
+
+  it("answers not ok, once, when hiding the draft fails", async () => {
+    const { posted } = await run(({ draft }) => {
+      draft.setVisible = () => {
+        throw new Error("layer is gone");
+      };
+    });
+
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({ ok: false });
+  });
+});
+
+describe("refreshes that overlap", () => {
+  it("does not call a refresh ok when a newer refresh of the same source took it over", async () => {
+    const calls: string[] = [];
+    const draft = layer("draft");
+    const { viewer } = fakeViewer(
+      [layer("committed"), draft],
+      {
+        committed: [
+          [source("a", { superseded: true, refreshed: 0, skipped: 2 })],
+        ],
+      },
+      calls,
+    );
+    const { env: e, posted } = env(calls);
+
+    await handleSoftInvalidate(
+      viewer,
+      { layerName: "committed", commitId: "c1", hideLayerName: "draft" },
+      e,
+      new DraftHider(viewer.layerManager),
+    );
+
+    expect(posted[0]).toMatchObject({ ok: false, hidden: false });
+    expect(draft.visible).toBe(true);
+  });
+
+  /** The queue manager's side of a hold, with the real UpdateHold and a record of what reached the screen. */
+  function holdingQueue() {
+    const hold = new UpdateHold<object, { id: string; refresh?: boolean }>();
+    const onScreen: string[] = [];
+    return {
+      onScreen,
+      beginRefreshHold: vi.fn(() => hold.begin()),
+      endRefreshHold: vi.fn(() => {
+        for (const update of hold.end()) onScreen.push(update.id);
+        return 0;
+      }),
+      /** What the frontend does with a replacement that the worker sends. */
+      arrives(chunkSource: object, id: string) {
+        if (!hold.keep(chunkSource, { id, refresh: true })) onScreen.push(id);
+      },
+    };
+  }
+
+  it("has the replacements of a refresh on screen when it answers ok, although another refresh started before it finished", async () => {
+    const calls: string[] = [];
+    const queue = holdingQueue();
+    const sourceA = source("a");
+    const sourceB = source("b");
+    const gate = {
+      a: Promise.withResolvers<void>(),
+      b: Promise.withResolvers<void>(),
+    };
+    sourceA.refreshCache.mockImplementation(async () => {
+      await gate.a.promise;
+      queue.arrives(sourceA, "A's replacement");
+      return {
+        refreshed: 1,
+        skipped: 0,
+        failed: 0,
+        fellBack: false,
+        superseded: false,
+      };
+    });
+    sourceB.refreshCache.mockImplementation(async () => {
+      await gate.b.promise;
+      queue.arrives(sourceB, "B's replacement");
+      return {
+        refreshed: 1,
+        skipped: 0,
+        failed: 0,
+        fellBack: false,
+        superseded: false,
+      };
+    });
+    const { viewer } = fakeViewer(
+      [layer("layer A"), layer("layer B")],
+      { "layer A": [[sourceA]], "layer B": [[sourceB]] },
+      calls,
+    );
+    viewer.chunkQueueManager = queue;
+    const first = env(calls);
+    const second = env(calls);
+    // what is on screen at the moment each answer is sent
+    const seenAtAnswer: Record<string, string[]> = {};
+    first.env.post = (m) => {
+      seenAtAnswer.A = [...queue.onScreen];
+      first.posted.push(m);
+    };
+    second.env.post = (m) => {
+      seenAtAnswer.B = [...queue.onScreen];
+      second.posted.push(m);
+    };
+
+    const a = handleSoftInvalidate(
+      viewer,
+      { layerName: "layer A", commitId: "A" },
+      first.env,
+      new DraftHider(viewer.layerManager),
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    const b = handleSoftInvalidate(
+      viewer,
+      { layerName: "layer B", commitId: "B" },
+      second.env,
+      new DraftHider(viewer.layerManager),
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    gate.a.resolve();
+    await a;
+    gate.b.resolve();
+    await b;
+
+    expect(first.posted[0]).toMatchObject({ ok: true });
+    expect(
+      seenAtAnswer.A,
+      "the answer said ok while the replacement was still held back",
+    ).toContain("A's replacement");
+    expect(seenAtAnswer.B).toContain("B's replacement");
+  });
+
+  it("cancels the older refresh of a layer when a newer one starts, shows the newer one's replacements, and does not empty the sources the older one was reading", async () => {
+    const calls: string[] = [];
+    const queue = holdingQueue();
+    const s = source("s");
+    s.refreshCache
+      .mockImplementationOnce(async (signal?: AbortSignal) => hang(signal))
+      .mockImplementation(async () => {
+        queue.arrives(s, "newer replacement");
+        return {
+          refreshed: 1,
+          skipped: 0,
+          failed: 0,
+          fellBack: false,
+          superseded: false,
+        };
+      });
+    const { viewer } = fakeViewer(
+      [layer("committed")],
+      { committed: [[s]] },
+      calls,
+    );
+    viewer.chunkQueueManager = queue;
+    const running = new RunningRefreshes();
+    const first = env(calls);
+    const second = env(calls);
+
+    const older = handleSoftInvalidate(
+      viewer,
+      { layerName: "committed", commitId: "older" },
+      first.env,
+      new DraftHider(viewer.layerManager),
+      running,
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    const newer = handleSoftInvalidate(
+      viewer,
+      { layerName: "committed", commitId: "newer" },
+      second.env,
+      new DraftHider(viewer.layerManager),
+      running,
+    );
+    await vi.runAllTimersAsync();
+    await Promise.all([older, newer]);
+
+    expect(s.refreshCache.mock.calls[0][0].aborted).toBe(true);
+    expect(s.refreshCache.mock.calls[1][0].aborted).toBe(false);
+    expect(
+      s.invalidateCache,
+      "a cancelled refresh emptied the source",
+    ).not.toHaveBeenCalled();
+    expect(first.posted[0]).toMatchObject({ commitId: "older", ok: false });
+    expect(second.posted[0]).toMatchObject({ commitId: "newer", ok: true });
+    expect(queue.onScreen).toContain("newer replacement");
+  });
+});
+
+describe("cancelling the reads of a refresh", () => {
+  const message = { layerName: "committed", commitId: "c1" };
+
+  it("gives every source a signal that stays open while the refresh runs, and asks it to cancel nothing at the answer", async () => {
+    const calls: string[] = [];
+    const slow = source("slow", "hang");
+    const { viewer } = fakeViewer(
+      [layer("committed")],
+      { committed: [[slow]] },
+      calls,
+    );
+    const { env: e, posted } = env(calls, 8000, 60_000);
+
+    const running = handleSoftInvalidate(
+      viewer,
+      message,
+      e,
+      new DraftHider(viewer.layerManager),
+    );
+    await vi.advanceTimersByTimeAsync(8001);
+    await running;
+
+    // the answer went out at 8 s: late chunks are still wanted, so the reads go on
+    expect(posted[0]).toMatchObject({ ok: false, timedOut: true });
+    expect(slow.refreshCache.mock.calls[0][0].aborted).toBe(false);
+  });
+
+  it("cancels the reads that are still running after the hard limit, and does not empty the source for that", async () => {
+    const calls: string[] = [];
+    const stuck = source("stuck", "hang");
+    const { viewer } = fakeViewer(
+      [layer("committed")],
+      { committed: [[stuck]] },
+      calls,
+    );
+    const { env: e } = env(calls, 8000, 60_000);
+
+    const running = handleSoftInvalidate(
+      viewer,
+      message,
+      e,
+      new DraftHider(viewer.layerManager),
+    );
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(stuck.refreshCache.mock.calls[0][0].aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(2);
+    await running;
+
+    expect(stuck.refreshCache.mock.calls[0][0].aborted).toBe(true);
+    expect(stuck.invalidateCache).not.toHaveBeenCalled();
+  });
+
+  it("drops its timer when the refresh finishes", async () => {
+    const calls: string[] = [];
+    const { viewer } = fakeViewer(
+      [layer("committed")],
+      { committed: [[source("a")]] },
+      calls,
+    );
+    const { env: e } = env(calls, 8000, 60_000);
+
+    await handleSoftInvalidate(
+      viewer,
+      message,
+      e,
+      new DraftHider(viewer.layerManager),
+    );
+
+    // DraftHider has no timer yet (nothing hidden), so nothing may be left running
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("RunningRefreshes", () => {
+  it("cancels the older refresh of a layer when a newer one begins, and only that layer's", () => {
+    const running = new RunningRefreshes();
+    const first = running.begin("committed", 60_000);
+    const other = running.begin("another", 60_000);
+
+    const second = running.begin("committed", 60_000);
+
+    expect(first.signal.aborted).toBe(true);
+    expect(other.signal.aborted).toBe(false);
+    expect(second.signal.aborted).toBe(false);
+  });
+
+  it("cancels at the hard limit and not before", () => {
+    const running = new RunningRefreshes();
+    const refresh = running.begin("committed", 60_000);
+
+    vi.advanceTimersByTime(59_999);
+    expect(refresh.signal.aborted).toBe(false);
+    vi.advanceTimersByTime(2);
+
+    expect(refresh.signal.aborted).toBe(true);
+  });
+
+  it("finish drops the timer and forgets the refresh, without touching a newer one", () => {
+    const running = new RunningRefreshes();
+    const first = running.begin("committed", 60_000);
+    const second = running.begin("committed", 60_000);
+
+    first.finish();
+    expect(second.signal.aborted).toBe(false);
+    second.finish();
+
+    expect(vi.getTimerCount()).toBe(0);
+    // nothing is left to cancel
+    const third = running.begin("committed", 60_000);
+    expect(third.signal.aborted).toBe(false);
+    third.finish();
   });
 });

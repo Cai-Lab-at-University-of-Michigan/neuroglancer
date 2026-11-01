@@ -654,15 +654,28 @@ describe("UpdateHold", () => {
     expect(hold.keep(sourceA, plain("p"))).toBe(false);
   });
 
-  it("gives the updates back only when the last of several holds ends", () => {
+  it("gives back what has been kept so far at every end, and keeps keeping while another hold is active", () => {
     const hold = new UpdateHold<object, Update>();
     hold.begin();
     hold.begin();
     hold.keep(sourceA, swap("s1"));
 
-    expect(hold.end()).toEqual([]);
+    expect(hold.end().map((u) => u.id)).toEqual(["s1"]);
     expect(hold.keep(sourceA, swap("s2"))).toBe(true);
-    expect(hold.end().map((u) => u.id)).toEqual(["s1", "s2"]);
+    expect(hold.end().map((u) => u.id)).toEqual(["s2"]);
+    expect(hold.keep(sourceA, swap("s3"))).toBe(false);
+  });
+
+  it("does not keep an update again that it gave back, however many holds are still active", () => {
+    // the frontend feeds the given-back updates through the same entry as new ones
+    const hold = new UpdateHold<object, Update>();
+    hold.begin();
+    hold.begin();
+    hold.keep(sourceA, swap("s1"));
+
+    const [given] = hold.end();
+
+    expect(hold.keep(sourceA, given)).toBe(false);
   });
 
   it("ignores an end that has no begin, and does not make the next hold end early", () => {

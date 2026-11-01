@@ -1224,7 +1224,13 @@ export class ChunkQueueManager extends SharedObjectCounterpart {
   ): Promise<ChunkSourceRefreshResult> {
     if (!canReadFresh(source)) {
       this.invalidateSourceCache(source as ChunkSource);
-      return { refreshed: 0, skipped: 0, failed: 0, fellBack: true };
+      return {
+        refreshed: 0,
+        skipped: 0,
+        failed: 0,
+        fellBack: true,
+        superseded: false,
+      };
     }
     const generation = (this.refreshGenerations.get(source) ?? 0) + 1;
     this.refreshGenerations.set(source, generation);
@@ -1272,7 +1278,11 @@ export class ChunkQueueManager extends SharedObjectCounterpart {
         concurrency: SOFT_REFRESH_CONCURRENCY,
         rereadDelayMs: SOFT_REFRESH_REREAD_DELAY_MS,
       });
-      return { ...outcome, fellBack: false };
+      return {
+        ...outcome,
+        fellBack: false,
+        superseded: this.refreshGenerations.get(source) !== generation,
+      };
     } finally {
       // A chunk that was to be replaced and was not (cancelled, moved out of
       // GPU memory by the cache) must not keep its old data: drop it, so the
