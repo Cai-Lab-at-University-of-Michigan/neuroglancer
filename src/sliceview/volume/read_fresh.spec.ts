@@ -24,11 +24,11 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { ChunkState } from "#src/chunk_manager/base.js";
-import type { vec3 } from "#src/util/geom.js";
 import {
   VolumeChunk,
   VolumeChunkSource,
 } from "#src/sliceview/volume/backend.js";
+import type { vec3 } from "#src/util/geom.js";
 
 function setup(
   download: (chunk: VolumeChunk, signal: AbortSignal) => Promise<void>,

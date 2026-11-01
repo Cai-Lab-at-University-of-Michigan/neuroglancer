@@ -468,7 +468,6 @@ export class DraftHider {
 export function animationFrames(count: number, fallbackMs: number) {
   return new Promise<void>((resolve) => {
     let left = count;
-    let timer: ReturnType<typeof setTimeout> | undefined;
     const finish = () => {
       clearTimeout(timer);
       resolve();
@@ -480,7 +479,7 @@ export function animationFrames(count: number, fallbackMs: number) {
         requestAnimationFrame(tick);
       }
     };
-    timer = setTimeout(finish, fallbackMs);
+    const timer = setTimeout(finish, fallbackMs);
     requestAnimationFrame(tick);
   });
 }
