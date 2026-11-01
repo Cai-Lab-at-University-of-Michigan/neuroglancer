@@ -116,8 +116,11 @@ function fakeViewer(
       },
     },
     chunkQueueManager: {
-      flushPendingChunkUpdates: vi.fn(() => {
-        calls.push("flush");
+      beginRefreshHold: vi.fn(() => {
+        calls.push("hold");
+      }),
+      endRefreshHold: vi.fn(() => {
+        calls.push("release");
         return 0;
       }),
     },
@@ -221,7 +224,7 @@ describe("handleSoftInvalidate", () => {
     }
   });
 
-  it("puts the new data on screen, then hides the draft in the same frame, then answers", async () => {
+  it("puts the new data on screen and hides the draft in one step, then answers", async () => {
     const calls: string[] = [];
     const draft = layer("draft");
     draft.setVisible = vi.fn((v: boolean) => {
@@ -242,9 +245,11 @@ describe("handleSoftInvalidate", () => {
       new DraftHider(viewer.layerManager),
     );
 
-    // new chunks applied, draft hidden with no frame in between, then drawn, then the reply
+    // replacements held while the sources refresh, applied and the draft hidden with nothing in
+    // between (so with no frame in between), then drawn, then the reply
     expect(calls).toEqual([
-      "flush",
+      "hold",
+      "release",
       "draft visible=false",
       "redraw",
       "frames",
@@ -411,6 +416,109 @@ describe("handleSoftInvalidate", () => {
     expect(second.posted[0]).toMatchObject({ ok: true, hidden: false });
   });
 
+  it("does not hide a draft that was rebuilt while the refresh ran: that one holds the next stroke", async () => {
+    // The server rebuilds the draft when the user starts drawing again; the layer of that name is
+    // then a new one, and hiding it would hide the stroke being drawn.
+    const calls: string[] = [];
+    const first = layer("draft");
+    const layers = [layer("committed"), first];
+    let rebuilt: LayerLike | undefined;
+    const slow = source("a");
+    slow.refreshCache.mockImplementation(async () => {
+      rebuilt = layer("draft");
+      layers[1] = rebuilt;
+      return { refreshed: 2, skipped: 0, failed: 0, fellBack: false };
+    });
+    const { viewer } = fakeViewer(layers, { committed: [[slow]] }, calls);
+    const { env: e, posted } = env(calls);
+
+    await handleSoftInvalidate(
+      viewer,
+      { layerName: "committed", commitId: "c1", hideLayerName: "draft" },
+      e,
+      new DraftHider(viewer.layerManager),
+    );
+
+    expect(rebuilt?.visible, "the next stroke was hidden").toBe(true);
+    expect(first.visible).toBe(true);
+    expect(posted[0]).toMatchObject({ ok: true, hidden: false });
+  });
+
+  it("starts holding the replacements before it asks any source to refresh", async () => {
+    const calls: string[] = [];
+    const a = source("a");
+    const { viewer } = fakeViewer(
+      [layer("committed")],
+      { committed: [[a]] },
+      calls,
+    );
+    const { env: e } = env(calls);
+
+    await handleSoftInvalidate(
+      viewer,
+      { layerName: "committed", commitId: "c1" },
+      e,
+      new DraftHider(viewer.layerManager),
+    );
+
+    // a replacement that arrived before the hold began would be drawn on its own
+    const hold = vi.mocked(viewer.chunkQueueManager.beginRefreshHold);
+    expect(hold).toHaveBeenCalledTimes(1);
+    expect(hold.mock.invocationCallOrder[0]).toBeLessThan(
+      a.refreshCache.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("ends the hold once, also when a source and its fallback both throw", async () => {
+    const calls: string[] = [];
+    const broken = source("broken", new Error("rpc failed"));
+    broken.invalidateCache.mockImplementation(() => {
+      throw new Error("the source is gone");
+    });
+    const draft = layer("draft");
+    const { viewer } = fakeViewer(
+      [layer("committed"), draft],
+      { committed: [[broken, source("fine")]] },
+      calls,
+    );
+    const { env: e, posted } = env(calls);
+
+    await handleSoftInvalidate(
+      viewer,
+      { layerName: "committed", commitId: "c1", hideLayerName: "draft" },
+      e,
+      new DraftHider(viewer.layerManager),
+    );
+
+    // a hold that is never ended keeps every later replacement off the screen
+    expect(viewer.chunkQueueManager.endRefreshHold).toHaveBeenCalledTimes(1);
+    expect(posted[0]).toMatchObject({ ok: false, hidden: false });
+    expect(draft.visible).toBe(true);
+  });
+
+  it("ends the hold when it gives up waiting, so what has arrived is shown", async () => {
+    const calls: string[] = [];
+    const { viewer } = fakeViewer(
+      [layer("committed")],
+      { committed: [[source("slow", "never")]] },
+      calls,
+    );
+    const { env: e } = env(calls, 8000);
+
+    const running = handleSoftInvalidate(
+      viewer,
+      { layerName: "committed", commitId: "c1" },
+      e,
+      new DraftHider(viewer.layerManager),
+    );
+    await vi.advanceTimersByTimeAsync(7999);
+    expect(viewer.chunkQueueManager.endRefreshHold).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(2);
+    await running;
+
+    expect(viewer.chunkQueueManager.endRefreshHold).toHaveBeenCalledTimes(1);
+  });
+
   it("names the commit in the answer, so the page can tell which hold it ends", async () => {
     const calls: string[] = [];
     const { viewer } = fakeViewer(
@@ -441,6 +549,27 @@ describe("DraftHider", () => {
     expect(hider.hide("draft")).toBe(true);
     expect(draft.visible).toBe(false);
     expect(hider.hide("missing")).toBe(false);
+  });
+
+  it("does not hide a layer that is not the one it was told to expect", () => {
+    const expected = layer("draft");
+    const other = layer("draft");
+    const { viewer } = fakeViewer([other], {});
+    const hider = new DraftHider(viewer.layerManager);
+
+    expect(hider.hide("draft", expected)).toBe(false);
+
+    expect(other.visible).toBe(true);
+  });
+
+  it("hides the layer it was told to expect", () => {
+    const draft = layer("draft");
+    const { viewer } = fakeViewer([draft], {});
+    const hider = new DraftHider(viewer.layerManager);
+
+    expect(hider.hide("draft", draft)).toBe(true);
+
+    expect(draft.visible).toBe(false);
   });
 
   it("shows the same layer again after the safety time", () => {

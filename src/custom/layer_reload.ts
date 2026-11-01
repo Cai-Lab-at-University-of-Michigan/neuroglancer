@@ -69,7 +69,7 @@ export interface LayerManagerLike {
 export interface ViewerLike {
   display: { panels: Iterable<PanelLike>; scheduleRedraw(): void };
   layerManager: LayerManagerLike;
-  chunkQueueManager: { flushPendingChunkUpdates(): number };
+  chunkQueueManager: { beginRefreshHold(): void; endRefreshHold(): number };
 }
 
 /** How long the viewer waits for the sources of a soft refresh before it answers without them. */
@@ -144,6 +144,13 @@ export async function handleSoftInvalidate(
 ): Promise<void> {
   const { layerName, commitId, hideLayerName } = message;
   const sources = findLayerSources(viewer, layerName);
+  // The draft as it is now. If the page rebuilds it before the layer shows the
+  // new data (the user started drawing again), the layer of that name holds
+  // the next stroke and is left alone.
+  const draft =
+    hideLayerName === undefined
+      ? undefined
+      : viewer.layerManager.getLayerByName(hideLayerName);
 
   let refreshed = 0;
   let failed = 0;
@@ -151,39 +158,48 @@ export async function handleSoftInvalidate(
   let inPlace = true;
   let timedOut = false;
 
-  const refreshing = Promise.all(
-    sources.map(async (source) => {
-      try {
-        const result = await source.refreshCache();
-        refreshed += result.refreshed;
-        failed += result.failed;
-        if (result.failed > 0 || result.fellBack) inPlace = false;
-      } catch {
-        ++failed;
-        inPlace = false;
-        source.invalidateCache();
-      }
-    }),
-  );
-
+  // The replacements are kept back until every source has answered, so that
+  // they appear together, in the frame that hides the draft.
+  viewer.chunkQueueManager.beginRefreshHold();
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<void>((resolve) => {
-    timer = setTimeout(() => {
-      timedOut = true;
-      resolve();
-    }, env.timeoutMs);
-  });
-  await Promise.race([refreshing, timeout]);
-  clearTimeout(timer);
+  try {
+    const refreshing = Promise.all(
+      sources.map(async (source) => {
+        try {
+          const result = await source.refreshCache();
+          refreshed += result.refreshed;
+          failed += result.failed;
+          if (result.failed > 0 || result.fellBack) inPlace = false;
+        } catch {
+          ++failed;
+          inPlace = false;
+          try {
+            source.invalidateCache();
+          } catch (err) {
+            console.error("[invalidate_chunks] could not invalidate", err);
+          }
+        }
+      }),
+    );
+    const timeout = new Promise<void>((resolve) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        resolve();
+      }, env.timeoutMs);
+    });
+    await Promise.race([refreshing, timeout]);
+  } finally {
+    clearTimeout(timer);
+    // Put every replacement that has arrived on screen. A refresh that is
+    // still running when this gives up is not cancelled: its chunks arrive
+    // later and are drawn as they come.
+    viewer.chunkQueueManager.endRefreshHold();
+  }
 
-  // Put every replacement that has arrived on screen. A refresh that is still
-  // running when this gives up is not cancelled: its chunks arrive later and
-  // are drawn as they come.
-  viewer.chunkQueueManager.flushPendingChunkUpdates();
   const ok = inPlace && !timedOut;
   let hidden = false;
-  if (ok && sources.length > 0 && hideLayerName !== undefined) {
-    hidden = hider.hide(hideLayerName);
+  if (ok && sources.length > 0 && hideLayerName !== undefined && draft) {
+    hidden = hider.hide(hideLayerName, draft);
   }
   viewer.display.scheduleRedraw();
   await env.frames();
@@ -222,10 +238,14 @@ export class DraftHider {
     this.stopListening = layerManager.layersChanged.add(() => this.check());
   }
 
-  /** Hides `name`. False when there is no such layer, or it was hidden already. */
-  hide(name: string): boolean {
+  /**
+   * Hides `name`. False when there is no such layer, it is not `expected`
+   * (when that is given), or it was hidden already.
+   */
+  hide(name: string, expected?: LayerLike): boolean {
     const layer = this.layerManager.getLayerByName(name);
     if (layer === undefined) return false;
+    if (expected !== undefined && layer !== expected) return false;
     const hiddenHere = this.hidden.get(name)?.layer === layer;
     this.forget(name);
     // A layer the user has hidden is theirs: it is neither hidden here nor shown later.

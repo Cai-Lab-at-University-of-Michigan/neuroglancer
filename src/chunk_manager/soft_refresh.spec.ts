@@ -28,6 +28,7 @@ import { ChunkPriorityTier, ChunkState } from "#src/chunk_manager/base.js";
 import {
   Slots,
   type RefreshOps,
+  UpdateHold,
   pause,
   planRefresh,
   putChunk,
@@ -586,5 +587,102 @@ describe("pause", () => {
     await expect(pause(300, controller.signal)).rejects.toMatchObject({
       name: "AbortError",
     });
+  });
+});
+
+describe("UpdateHold", () => {
+  type Update = { id: string; refresh?: boolean };
+  const swap = (id: string): Update => ({ id, refresh: true });
+  const plain = (id: string): Update => ({ id });
+  const sourceA = { name: "a" };
+  const sourceB = { name: "b" };
+
+  it("keeps nothing while no hold is active", () => {
+    const hold = new UpdateHold<object, Update>();
+
+    expect(hold.keep(sourceA, swap("s1"))).toBe(false);
+    expect(hold.keep(sourceA, plain("p1"))).toBe(false);
+  });
+
+  it("keeps the replacements of a refresh, and gives them back in order when the hold ends", () => {
+    const hold = new UpdateHold<object, Update>();
+    hold.begin();
+
+    expect(hold.keep(sourceA, swap("s1"))).toBe(true);
+    expect(hold.keep(sourceB, swap("s2"))).toBe(true);
+    expect(hold.keep(sourceA, swap("s3"))).toBe(true);
+
+    expect(hold.end().map((u) => u.id)).toEqual(["s1", "s2", "s3"]);
+  });
+
+  it("lets updates of other sources through: only what the refresh replaces is held", () => {
+    const hold = new UpdateHold<object, Update>();
+    hold.begin();
+    hold.keep(sourceA, swap("s1"));
+
+    expect(hold.keep(sourceB, plain("other layer panning in"))).toBe(false);
+  });
+
+  it("keeps a later update of a source that has a held replacement, so its updates stay in the order they were sent", () => {
+    // A replacement, then the worker evicting the same chunk: applying the eviction first and the
+    // replacement later would leave a chunk on the GPU that the worker has already dropped.
+    const hold = new UpdateHold<object, Update>();
+    hold.begin();
+    hold.keep(sourceA, swap("replace"));
+
+    expect(hold.keep(sourceA, plain("evict"))).toBe(true);
+
+    expect(hold.end().map((u) => u.id)).toEqual(["replace", "evict"]);
+  });
+
+  it("holds only from the first replacement of a source: an earlier update of it is not kept", () => {
+    const hold = new UpdateHold<object, Update>();
+    hold.begin();
+
+    expect(hold.keep(sourceA, plain("before"))).toBe(false);
+    hold.keep(sourceA, swap("s1"));
+    expect(hold.keep(sourceA, plain("after"))).toBe(true);
+  });
+
+  it("keeps nothing after the hold has ended: a replacement that arrives late is applied as it comes", () => {
+    const hold = new UpdateHold<object, Update>();
+    hold.begin();
+    hold.keep(sourceA, swap("s1"));
+    hold.end();
+
+    expect(hold.keep(sourceA, swap("late"))).toBe(false);
+    expect(hold.keep(sourceA, plain("p"))).toBe(false);
+  });
+
+  it("gives the updates back only when the last of several holds ends", () => {
+    const hold = new UpdateHold<object, Update>();
+    hold.begin();
+    hold.begin();
+    hold.keep(sourceA, swap("s1"));
+
+    expect(hold.end()).toEqual([]);
+    expect(hold.keep(sourceA, swap("s2"))).toBe(true);
+    expect(hold.end().map((u) => u.id)).toEqual(["s1", "s2"]);
+  });
+
+  it("ignores an end that has no begin, and does not make the next hold end early", () => {
+    const hold = new UpdateHold<object, Update>();
+
+    expect(hold.end()).toEqual([]);
+    hold.begin();
+    hold.keep(sourceA, swap("s1"));
+
+    expect(hold.end().map((u) => u.id)).toEqual(["s1"]);
+  });
+
+  it("starts the next hold empty", () => {
+    const hold = new UpdateHold<object, Update>();
+    hold.begin();
+    hold.keep(sourceA, swap("s1"));
+    hold.end();
+    hold.begin();
+
+    expect(hold.keep(sourceA, plain("p"))).toBe(false);
+    expect(hold.end()).toEqual([]);
   });
 });

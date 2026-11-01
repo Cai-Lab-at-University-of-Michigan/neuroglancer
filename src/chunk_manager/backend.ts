@@ -69,8 +69,13 @@ import {
 
 const DEBUG_CHUNK_UPDATES = false;
 
-/** Reads in flight at once during soft refreshes, over all sources of a queue manager. */
-const SOFT_REFRESH_CONCURRENCY = 4;
+/**
+ * Reads in flight at once during soft refreshes, over all sources of a queue
+ * manager. The viewer's own downloads run up to 100 at a time and a refresh
+ * makes the same reads, so this only keeps one commit from taking every
+ * connection; a lower number made a slow link read the visible chunks in waves.
+ */
+const SOFT_REFRESH_CONCURRENCY = 16;
 
 /** Pause before a chunk that had data and came back empty is read a second time. */
 const SOFT_REFRESH_REREAD_DELAY_MS = 300;
@@ -1200,6 +1205,8 @@ export class ChunkQueueManager extends SharedObjectCounterpart {
     const transfers: any[] = [];
     fresh.serialize(msg, transfers);
     msg.state = ChunkState.GPU_MEMORY;
+    // Lets the frontend keep the replacement back while the page holds them.
+    msg.refresh = true;
     this.rpc!.invoke("Chunk.update", msg, transfers);
     this.scheduleUpdate();
   }

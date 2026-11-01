@@ -28,7 +28,7 @@ import {
   ChunkState,
   REQUEST_CHUNK_STATISTICS_RPC_ID,
 } from "#src/chunk_manager/base.js";
-import { putChunk } from "#src/chunk_manager/soft_refresh.js";
+import { putChunk, UpdateHold } from "#src/chunk_manager/soft_refresh.js";
 import { SharedWatchableValue } from "#src/shared_watchable_value.js";
 import { TrackableBoolean } from "#src/trackable_boolean.js";
 import { TrackableValue } from "#src/trackable_value.js";
@@ -112,6 +112,9 @@ export class ChunkQueueManager extends SharedObject {
   chunkUpdateDeadline: number | null = null;
 
   chunkUpdateDelay = 30;
+
+  /** Keeps the replacements of a soft refresh back until `endRefreshHold`. */
+  private refreshHold = new UpdateHold<ChunkSource, any>();
 
   enablePrefetch = new TrackableBoolean(true, true);
 
@@ -306,6 +309,34 @@ export class ChunkQueueManager extends SharedObject {
     return this.processPendingChunkUpdates(true);
   }
 
+  /**
+   * From now on the replacements a soft refresh sends (see
+   * `ChunkSource.refreshCache`) are kept back, so that they can be put on
+   * screen together. Every call needs an `endRefreshHold`.
+   */
+  beginRefreshHold() {
+    this.refreshHold.begin();
+  }
+
+  /** Whether `update` is kept back by a refresh hold. */
+  holdUpdate(source: ChunkSource, update: any) {
+    return this.refreshHold.keep(source, update);
+  }
+
+  /**
+   * Ends a refresh hold. When it is the last one, the replacements kept back
+   * are applied together with everything else that is waiting, now.
+   */
+  endRefreshHold(): number {
+    for (const update of this.refreshHold.end()) {
+      // The source may have been removed while the update was kept back.
+      if (this.rpc!.get(update.source) !== undefined) {
+        updateChunk(this.rpc!, update);
+      }
+    }
+    return this.flushPendingChunkUpdates();
+  }
+
   async getStatistics(): Promise<Map<ChunkSource, Float64Array>> {
     const rpc = this.rpc!;
     const rawData = await rpc.promiseInvoke<Map<number, Float64Array>>(
@@ -331,6 +362,7 @@ function updateChunk(rpc: RPC, x: any) {
     );
   }
   const queueManager = source.chunkManager.chunkQueueManager;
+  if (queueManager.holdUpdate(source, x)) return;
   if (source.immediateChunkUpdates) {
     if (queueManager.applyChunkUpdate(x)) {
       queueManager.visibleChunksChanged.dispatch();

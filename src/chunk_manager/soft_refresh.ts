@@ -187,6 +187,47 @@ export function putChunk<C>(cache: ChunkCache<C>, key: string, chunk: C) {
   cache.addChunk(key, chunk);
 }
 
+/**
+ * Keeps the replacements of a soft refresh back until the page says they may
+ * be shown, so that everything the refresh replaces changes in one frame: the
+ * frame in which the draft layer is hidden. Without it each replacement is
+ * drawn as it arrives, and a stroke is drawn twice (by the committed layer,
+ * which already has it, and by the draft) until the rest has arrived.
+ *
+ * While a hold is active a replacement is kept, and so is every later update
+ * of the same source, so that the updates of a source are applied in the order
+ * the worker sent them: a replacement followed by an eviction of the same
+ * chunk must not be applied the other way round.
+ */
+export class UpdateHold<S, U extends { refresh?: boolean }> {
+  private holds = 0;
+  private held: U[] = [];
+  private heldSources = new Set<S>();
+
+  begin() {
+    ++this.holds;
+  }
+
+  /** Whether `update` was kept; if not, it is applied as usual. */
+  keep(source: S, update: U): boolean {
+    if (this.holds === 0) return false;
+    if (update.refresh !== true && !this.heldSources.has(source)) return false;
+    this.heldSources.add(source);
+    this.held.push(update);
+    return true;
+  }
+
+  /** Ends one hold. The last one gives back the kept updates, in the order they arrived. */
+  end(): U[] {
+    if (this.holds === 0) return [];
+    if (--this.holds > 0) return [];
+    const held = this.held;
+    this.held = [];
+    this.heldSources.clear();
+    return held;
+  }
+}
+
 /** A fixed number of slots, handed out first come, first served. */
 export class Slots {
   private free: number;
