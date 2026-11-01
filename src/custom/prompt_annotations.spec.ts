@@ -101,6 +101,86 @@ describe("a box becomes a closed rectangle on the slice it was drawn on", () => 
   });
 });
 
+describe("a box drawn in an XZ or YZ panel keeps its shape", () => {
+  // Every box used to be built as if it lay in an XY plane: z from the first
+  // corner, x paired with y. A box drawn in an XZ panel has one y and spans z,
+  // so its corners collapsed onto one edge and what stayed on screen was a line.
+  const corners = (prompt: Parameters<typeof promptAnnotations>[1]) =>
+    promptAnnotations(XYZ, prompt)[0].points.map((p: Float32Array) =>
+      Array.from(p),
+    );
+  const box = (
+    startPoint: { x: number; y: number; z: number },
+    endPoint: { x: number; y: number; z: number },
+  ) => ({
+    mode: "bbox" as const,
+    startPoint,
+    endPoint,
+    polarity: "positive" as const,
+  });
+
+  it("in XY, spans x and y on the box's one z, as before", () => {
+    expect(
+      corners(box({ x: 10, y: 20, z: 5 }, { x: 40, y: 60, z: 5 })),
+    ).toEqual([
+      [10, 20, 5],
+      [40, 20, 5],
+      [40, 60, 5],
+      [10, 60, 5],
+      [10, 20, 5],
+    ]);
+  });
+
+  it("in XZ, spans x and z on the box's one y", () => {
+    expect(
+      corners(box({ x: 10, y: 30, z: 4 }, { x: 40, y: 30, z: 16 })),
+    ).toEqual([
+      [10, 30, 4],
+      [40, 30, 4],
+      [40, 30, 16],
+      [10, 30, 16],
+      [10, 30, 4],
+    ]);
+  });
+
+  it("in YZ, spans y and z on the box's one x", () => {
+    expect(
+      corners(box({ x: 25, y: 20, z: 16 }, { x: 25, y: 60, z: 4 })),
+    ).toEqual([
+      [25, 20, 16],
+      [25, 60, 16],
+      [25, 60, 4],
+      [25, 20, 4],
+      [25, 20, 16],
+    ]);
+  });
+
+  it("stays on the first corner's y in XZ even if the drag reports two", () => {
+    // The same guard the XY case has for z: the axis the box was drawn across
+    // is the one it barely moves along, not necessarily one it never moves along.
+    const ys = corners(
+      box({ x: 10, y: 30, z: 4 }, { x: 40, y: 31, z: 16 }),
+    ).map((p: number[]) => p[1]);
+    expect(new Set(ys)).toEqual(new Set([30]));
+  });
+
+  it("comes back as a rectangle when the panel restores it", () => {
+    // A restore (undo, switching objects) rebuilds every prompt from what the
+    // panel kept, so it goes through the same arithmetic.
+    const restored = promptFromPanel({
+      type: "bbox",
+      polarity: "positive",
+      data: {
+        startPoint: { x: 45.5, y: 48, z: 10.25 },
+        endPoint: { x: 78.5, y: 48, z: 35 },
+      },
+    });
+    const points = corners(restored!);
+    expect(new Set(points.slice(0, 4).map(String)).size).toBe(4);
+    expect(points[4]).toEqual(points[0]);
+  });
+});
+
 describe("a scribble or lasso becomes the path it traced", () => {
   const scribble = {
     mode: "scribble" as const,

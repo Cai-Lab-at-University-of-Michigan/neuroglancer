@@ -137,14 +137,31 @@ export function makeAnnotationPoint(
   return arr;
 }
 
+const BOX_AXES = ["x", "y", "z"] as const;
+
+/**
+ * The axis a box was drawn across: the one its two corners differ in least,
+ * which is zero for any real drag. A tie goes to z, so a box that never moved
+ * at all comes out the way every box did before XZ and YZ were handled.
+ */
+function boxFlatAxis(a: StrokePoint, b: StrokePoint): "x" | "y" | "z" {
+  let flat: "x" | "y" | "z" = "z";
+  for (const axis of ["y", "x"] as const) {
+    if (Math.abs(b[axis] - a[axis]) < Math.abs(b[flat] - a[flat])) {
+      flat = axis;
+    }
+  }
+  return flat;
+}
+
 /**
  * Turn a finished prompt into the annotations that stand for it.
  *
  * A box becomes a closed polyline rather than an axis-aligned bounding box. It
- * is drawn on a single slice, so its box would have zero thickness in Z, and
- * what a zero-thickness box does in a cross-section view is not something to
- * find out in production. A polyline is line segments lying in the slice plane,
- * which is the ordinary case for a line annotation.
+ * is drawn on a single slice, so its box would have zero thickness across that
+ * slice, and what a zero-thickness box does in a cross-section view is not
+ * something to find out in production. A polyline is line segments lying in
+ * the slice plane, which is the ordinary case for a line annotation.
  */
 export function promptAnnotations(viewer: any, prompt: Prompt): any[] {
   const common = () => ({
@@ -168,16 +185,25 @@ export function promptAnnotations(viewer: any, prompt: Prompt): any[] {
   if (prompt.mode === "bbox") {
     const { startPoint: a, endPoint: b } = prompt;
     if (!isValidPoint(a) || !isValidPoint(b)) return [];
-    // The drag never changes slice, so both corners share a Z; taking it from
-    // the first corner keeps the rectangle flat even if that ever stops
-    // holding.
-    const z = a.z;
+    // The drag never changes slice, so both corners share the coordinate
+    // across the slice: z in an XY panel, but y in an XZ panel and x in a YZ
+    // one. Building every box in x and y, as this once did, folded an XZ or
+    // YZ box onto one of its edges. Taking that coordinate from the first
+    // corner keeps the rectangle flat even if the drag ever reports two.
+    const flat = boxFlatAxis(a, b);
+    const [u, v] = BOX_AXES.filter((axis) => axis !== flat);
+    const corner = (pu: StrokePoint, pv: StrokePoint): StrokePoint => {
+      const p = { ...a };
+      p[u] = pu[u];
+      p[v] = pv[v];
+      return p;
+    };
     const corners: StrokePoint[] = [
-      { x: a.x, y: a.y, z },
-      { x: b.x, y: a.y, z },
-      { x: b.x, y: b.y, z },
-      { x: a.x, y: b.y, z },
-      { x: a.x, y: a.y, z },
+      corner(a, a),
+      corner(b, a),
+      corner(b, b),
+      corner(a, b),
+      corner(a, a),
     ];
     return [
       {
