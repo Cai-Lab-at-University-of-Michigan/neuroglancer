@@ -16,6 +16,7 @@
 
 import type {
   ChunkSourceParametersConstructor,
+  ChunkSourceRefreshResult,
   LayerChunkProgressInfo,
 } from "#src/chunk_manager/base.js";
 import {
@@ -23,9 +24,11 @@ import {
   CHUNK_MANAGER_RPC_ID,
   CHUNK_QUEUE_MANAGER_RPC_ID,
   CHUNK_SOURCE_INVALIDATE_RPC_ID,
+  CHUNK_SOURCE_REFRESH_RPC_ID,
   ChunkState,
   REQUEST_CHUNK_STATISTICS_RPC_ID,
 } from "#src/chunk_manager/base.js";
+import { putChunk } from "#src/chunk_manager/soft_refresh.js";
 import { SharedWatchableValue } from "#src/shared_watchable_value.js";
 import { TrackableBoolean } from "#src/trackable_boolean.js";
 import { TrackableValue } from "#src/trackable_value.js";
@@ -258,7 +261,9 @@ export class ChunkQueueManager extends SharedObject {
         const key = update.id;
         if (update.new) {
           chunk = source.getChunk(update);
-          source.addChunk(key, chunk);
+          // A soft refresh sends a new chunk for a key that is on screen; the
+          // old one is deleted first so that its GPU memory is freed.
+          putChunk(source, key, chunk);
         } else {
           chunk = source.chunks.get(key)!;
         }
@@ -479,6 +484,21 @@ export class ChunkSource extends SharedObject {
    */
   invalidateCache(): void {
     this.rpc!.invoke(CHUNK_SOURCE_INVALIDATE_RPC_ID, { id: this.rpcId });
+  }
+
+  /**
+   * Reads the chunks of this source again WITHOUT emptying it: a chunk that is
+   * on screen stays until its new data has arrived, and is then replaced in
+   * one step (see `soft_refresh.ts`). Resolves when every chunk has been
+   * replaced or dropped; the replacements are queued here by then, and
+   * `flushPendingChunkUpdates` puts them on screen.
+   */
+  refreshCache(): Promise<ChunkSourceRefreshResult> {
+    // `source`, not `id`: promiseInvoke overwrites `id` with the promise's own.
+    return this.rpc!.promiseInvoke<ChunkSourceRefreshResult>(
+      CHUNK_SOURCE_REFRESH_RPC_ID,
+      { source: this.rpcId },
+    );
   }
 
   static encodeOptions(_options: object): { [key: string]: any } {

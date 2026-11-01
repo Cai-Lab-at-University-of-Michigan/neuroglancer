@@ -3,6 +3,13 @@ import {
   sliceFadeSlices,
 } from "#src/annotation/slice_fade.js";
 import type { DrawingTool } from "#src/custom/drawing_tool.js";
+import type { ViewerLike } from "#src/custom/layer_reload.js";
+import {
+  animationFrames,
+  DraftHider,
+  handleSoftInvalidate,
+  SOFT_REFRESH_TIMEOUT_MS,
+} from "#src/custom/layer_reload.js";
 import { initMinimap, getMinimap } from "#src/custom/minimap.js";
 import {
   DATA_PANEL_SELECTOR,
@@ -590,6 +597,7 @@ function sendBuildInfo(parent: Window) {
 export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
   const { canvas, ctx, viewer } = drawingTool;
   const container = viewer.display.container as HTMLElement;
+  const draftHider = new DraftHider(viewer.layerManager);
 
   // Viewport channel — parent asks for the crosshair position so the
   // ECDF endpoint can localize histogram sampling to the region the
@@ -1071,6 +1079,37 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
     if (type === "invalidate_chunks") {
       const layerId = event.data.layerId;
       const reloadLayer = event.data.reloadLayer === true;
+
+      // A commit asks for the soft form (see layer_reload.ts): the one layer is
+      // read again without being emptied, the draft is hidden once the layer
+      // shows the new data, and the page is told with layer_reloaded. A message
+      // without the commit's fields takes the invalidation below, as before.
+      if (
+        event.data.soft === true &&
+        typeof event.data.layerName === "string" &&
+        typeof event.data.commitId === "string"
+      ) {
+        handleSoftInvalidate(
+          viewer as unknown as ViewerLike,
+          {
+            layerName: event.data.layerName,
+            commitId: event.data.commitId,
+            hideLayerName:
+              typeof event.data.hideLayerName === "string"
+                ? event.data.hideLayerName
+                : undefined,
+          },
+          {
+            post: (reply) => window.parent.postMessage(reply, "*"),
+            frames: () => animationFrames(2, 250),
+            timeoutMs: SOFT_REFRESH_TIMEOUT_MS,
+          },
+          draftHider,
+        ).catch((err) => {
+          console.error("[invalidate_chunks] soft refresh failed:", err);
+        });
+        return;
+      }
 
       // If reloadLayer is requested with a layerId, reload the layer to refetch /info
       // This is needed for virtual stitching where tile offsets change

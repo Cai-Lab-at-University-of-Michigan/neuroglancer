@@ -155,5 +155,30 @@ export class VolumeChunkSource
   computeChunkBounds(chunk: VolumeChunk) {
     return computeChunkBounds(this, chunk);
   }
+
+  /**
+   * Reads `chunk` again into a new object that is not part of the cache, for
+   * `ChunkQueueManager.refreshSourceCache`: the chunk in the cache keeps
+   * serving until the caller swaps the new data in.
+   */
+  async readFresh(
+    chunk: VolumeChunk,
+    signal: AbortSignal,
+  ): Promise<VolumeChunk> {
+    const fresh = new this.chunkConstructor() as VolumeChunk;
+    fresh.source = this;
+    fresh.initializeVolumeChunk(chunk.key!, chunk.chunkGridPosition as vec3);
+    await this.download(fresh, signal);
+    return fresh;
+  }
+
+  /** A chunk that was never written comes back from `download` without data. */
+  isFreshEmpty(fresh: VolumeChunk) {
+    return fresh.data === null;
+  }
+
+  freshBytes(fresh: VolumeChunk) {
+    return fresh.data?.byteLength ?? 0;
+  }
 }
 VolumeChunkSource.prototype.chunkConstructor = VolumeChunk;

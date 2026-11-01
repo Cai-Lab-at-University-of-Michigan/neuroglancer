@@ -100,6 +100,19 @@ export const PREFETCH_PRIORITY_MULTIPLIER = 1e13;
 export const CHUNK_QUEUE_MANAGER_RPC_ID = "ChunkQueueManager";
 export const CHUNK_MANAGER_RPC_ID = "ChunkManager";
 export const CHUNK_SOURCE_INVALIDATE_RPC_ID = "ChunkSource.invalidate";
+export const CHUNK_SOURCE_REFRESH_RPC_ID = "ChunkSource.refresh";
+
+/** What a soft refresh of one chunk source did (see `ChunkSource.refreshCache`). */
+export interface ChunkSourceRefreshResult {
+  /** Chunks on screen that were read again and replaced in place. */
+  refreshed: number;
+  /** Chunks left alone because they were no longer in the cache, or the refresh was cancelled. */
+  skipped: number;
+  /** Chunks whose read failed; each was dropped, so the normal queue reads it from scratch. */
+  failed: number;
+  /** The source cannot be refreshed in place, so it was invalidated the old way. */
+  fellBack: boolean;
+}
 
 export const REQUEST_CHUNK_STATISTICS_RPC_ID =
   "ChunkQueueManager.requestChunkStatistics";
