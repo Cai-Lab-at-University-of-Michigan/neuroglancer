@@ -17,7 +17,9 @@ import {
   findPromptSource,
   makeAnnotationPoint,
   mouseInDataBounds,
+  PromptLayerMirror,
   pointFromMouseState,
+  PromptLayerMirror,
   promptAnnotations,
   promptFromPanel,
 } from "#src/custom/prompt_annotations.js";
@@ -482,5 +484,130 @@ describe("findPromptSource", () => {
       findPromptSource([layer("other", {})], "__seeds_pos"),
     ).toBeUndefined();
     expect(findPromptSource([], "__seeds_pos")).toBeUndefined();
+  });
+});
+
+describe("PromptLayerMirror", () => {
+  type Kind = "pos" | "neg";
+  const point = (polarity: "positive" | "negative", x: number) => ({
+    mode: "point" as const,
+    point: { x, y: 0, z: 0 },
+    polarity,
+  });
+
+  /** A source that records what it holds, standing in for a LocalAnnotationSource. */
+  const makeSource = () => {
+    const held: number[] = [];
+    return {
+      held,
+      add: (a: { x: number }) => held.push(a.x),
+      clear: () => {
+        held.length = 0;
+      },
+    };
+  };
+
+  /** Layers by kind; a layer maps to its source, or to null while it is not ready. */
+  function setup() {
+    const layers = new Map<Kind, ReturnType<typeof makeSource> | null>();
+    const created: Kind[] = [];
+    const mirror = new PromptLayerMirror<Kind>({
+      kinds: ["pos", "neg"],
+      kindOf: (p) => (p.polarity === "positive" ? "pos" : "neg"),
+      find: (kind) => (layers.has(kind) ? layers.get(kind) : undefined),
+      create: (kind) => {
+        created.push(kind);
+        layers.set(kind, null);
+      },
+      annotationsOf: (p) => [{ x: (p as any).point.x }],
+    });
+    return { layers, created, mirror };
+  }
+
+  it("draws a prompt on its layer", () => {
+    const { layers, mirror } = setup();
+    const pos = makeSource();
+    layers.set("pos", pos);
+    expect(mirror.sync([point("positive", 1)])).toBe(true);
+    expect(pos.held).toEqual([1]);
+  });
+
+  it("adds only the new prompts when the source is the same", () => {
+    const { layers, mirror } = setup();
+    const pos = makeSource();
+    layers.set("pos", pos);
+    mirror.sync([point("positive", 1)]);
+    const clear = vi.spyOn(pos, "clear");
+    mirror.sync([point("positive", 1), point("positive", 2)]);
+    expect(pos.held).toEqual([1, 2]);
+    expect(clear).not.toHaveBeenCalled();
+  });
+
+  it("draws every prompt again on the new source after the page rebuilt the layer", () => {
+    // The page replaces the viewer's state, the layer comes back with an empty
+    // source, and the prompts the panel and the next run use are not on it.
+    const { layers, mirror } = setup();
+    const prompts = [point("positive", 1), point("positive", 2)];
+    layers.set("pos", makeSource());
+    mirror.sync(prompts);
+    const rebuilt = makeSource();
+    layers.set("pos", rebuilt);
+    expect(mirror.sync([...prompts, point("positive", 3)])).toBe(true);
+    expect(rebuilt.held).toEqual([1, 2, 3]);
+  });
+
+  it("empties a rebuilt source that came back with stale contents", () => {
+    const { layers, mirror } = setup();
+    const prompts = [point("positive", 1)];
+    layers.set("pos", makeSource());
+    mirror.sync(prompts);
+    const rebuilt = makeSource();
+    rebuilt.held.push(99);
+    layers.set("pos", rebuilt);
+    mirror.sync(prompts);
+    expect(rebuilt.held).toEqual([1]);
+  });
+
+  it("creates a layer the page removed, and says it is not done until the source is ready", () => {
+    const { layers, created, mirror } = setup();
+    const prompts = [point("positive", 1)];
+    layers.set("pos", makeSource());
+    mirror.sync(prompts);
+    layers.delete("pos");
+    expect(mirror.sync(prompts)).toBe(false);
+    expect(created).toEqual(["pos"]);
+    // Asked again while the new layer has no source yet: no second layer.
+    expect(mirror.sync(prompts)).toBe(false);
+    expect(created).toEqual(["pos"]);
+    const fresh = makeSource();
+    layers.set("pos", fresh);
+    expect(mirror.sync(prompts)).toBe(true);
+    expect(fresh.held).toEqual([1]);
+  });
+
+  it("creates nothing for a kind that has no prompts", () => {
+    const { created, mirror } = setup();
+    expect(mirror.sync([])).toBe(true);
+    expect(created).toEqual([]);
+  });
+
+  it("redraws everything after invalidate, so a restore that keeps the count still changes the layer", () => {
+    const { layers, mirror } = setup();
+    const pos = makeSource();
+    layers.set("pos", pos);
+    mirror.sync([point("positive", 1)]);
+    mirror.invalidate();
+    mirror.sync([point("positive", 7)]);
+    expect(pos.held).toEqual([7]);
+  });
+
+  it("empties the layers when the list is emptied", () => {
+    const { layers, mirror } = setup();
+    const pos = makeSource();
+    layers.set("pos", pos);
+    mirror.sync([point("positive", 1)]);
+    mirror.invalidate();
+    mirror.sync([]);
+    expect(pos.held).toEqual([]);
   });
 });
