@@ -111,6 +111,115 @@ export function mouseInDataBounds(
   return true;
 }
 
+/**
+ * Where a prompt layer's dots live right now: the annotation source of the
+ * managed layer called `name`, read from the layer manager every time.
+ *
+ * It used to be remembered after the first lookup. The viewer rebuilds layers
+ * (it does while a Commit is being written), and a remembered source is then
+ * an object that is no longer on screen, so a prompt_clear emptied that one and
+ * left the dots people were looking at.
+ *
+ * Returns the source; null when the layer exists but its source is not ready;
+ * undefined when there is no layer of that name.
+ */
+export function findPromptSource(
+  managedLayers: Iterable<{ name: string; layer?: any }>,
+  name: string,
+): any {
+  for (const managedLayer of managedLayers) {
+    if (managedLayer.name !== name) continue;
+    return managedLayer.layer?.localAnnotations ?? null;
+  }
+  return undefined;
+}
+
+/** What the mirror needs from the viewer, so it can be run without one. */
+export interface PromptLayerEnv<K extends string> {
+  kinds: readonly K[];
+  kindOf(prompt: Prompt): K;
+  /** The kind's annotation source; null if its layer has none yet; undefined if there is no such layer. */
+  find(kind: K): any;
+  create(kind: K): void;
+  annotationsOf(prompt: Prompt): any[];
+}
+
+/**
+ * Keeps the prompt layers a drawing of the viewer's own list of prompts.
+ *
+ * Each prompt used to be added to its layer once, at the moment it was drawn.
+ * The page replaces the viewer's whole state when it changes a layer setting,
+ * and that removes and rebuilds the prompt layers: the new annotation source is
+ * empty, or the layer is gone. The prompt was still in the list the panel
+ * receives and the next run used it, but nothing put it back on screen.
+ *
+ * `sync` compares what each layer holds (which source, how many prompts) with
+ * the list and redraws whatever differs, so it can be called after anything
+ * that may have rebuilt the layers. It returns false while a layer that has
+ * prompts to show is missing, or any prompt layer is not ready, and the caller
+ * tries again.
+ */
+export class PromptLayerMirror<K extends string> {
+  private drawn = new Map<K, { source: any; count: number }>();
+
+  constructor(private env: PromptLayerEnv<K>) {}
+
+  /** Forget what was drawn, so the next sync redraws every layer from the list. */
+  invalidate(): void {
+    this.drawn.clear();
+  }
+
+  sync(prompts: readonly Prompt[]): boolean {
+    let complete = true;
+    for (const kind of this.env.kinds) {
+      const want = prompts.filter((p) => this.env.kindOf(p) === kind);
+      const source = this.env.find(kind);
+      if (source === undefined) {
+        this.drawn.delete(kind);
+        if (want.length === 0) continue;
+        this.env.create(kind);
+        complete = false;
+        continue;
+      }
+      if (source === null) {
+        // The layer is there but its source is not. A rebuilt layer can come
+        // back holding the dots it was saved with, so wait for it even when
+        // there is nothing to draw: the next sync empties it.
+        this.drawn.delete(kind);
+        complete = false;
+        continue;
+      }
+      const was = this.drawn.get(kind);
+      let from = 0;
+      if (
+        was !== undefined &&
+        was.source === source &&
+        was.count <= want.length
+      ) {
+        if (was.count === want.length) continue;
+        from = was.count;
+      } else {
+        try {
+          source.clear();
+        } catch (e) {
+          console.warn("[prompt] failed to clear annotations:", e);
+        }
+      }
+      for (const prompt of want.slice(from)) {
+        for (const annotation of this.env.annotationsOf(prompt)) {
+          try {
+            source.add(annotation);
+          } catch (e) {
+            console.warn("[prompt] failed to add annotation:", e);
+          }
+        }
+      }
+      this.drawn.set(kind, { source, count: want.length });
+    }
+    return complete;
+  }
+}
+
 // [BUG-016] Build a Float32Array point in NG coordinate space order.
 // The coordinate space is not always x, y, z in that order, and a point built
 // positionally lands somewhere else entirely when it is not.

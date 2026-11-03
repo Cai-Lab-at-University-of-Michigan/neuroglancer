@@ -29,9 +29,11 @@ import type {
   StrokePoint,
 } from "#src/custom/prompt_annotations.js";
 import {
+  findPromptSource,
   isValidPoint,
   mouseInDataBounds,
   pointFromMouseState,
+  PromptLayerMirror,
   promptAnnotations,
   promptFromPanel,
 } from "#src/custom/prompt_annotations.js";
@@ -336,26 +338,6 @@ void main() {
 `;
 }
 
-const _promptSources: Record<SeedLayerKind, any> = {
-  pos: null,
-  neg: null,
-  pos_line: null,
-  neg_line: null,
-};
-const _promptLayerCreated: Record<SeedLayerKind, boolean> = {
-  pos: false,
-  neg: false,
-  pos_line: false,
-  neg_line: false,
-};
-
-function resetPromptLayerCache() {
-  for (const kind of SEED_LAYER_KINDS) {
-    _promptSources[kind] = null;
-    _promptLayerCreated[kind] = false;
-  }
-}
-
 /**
  * Turn the slice fade on for the four prompt layers, and for nothing else.
  *
@@ -365,9 +347,9 @@ function resetPromptLayerCache() {
  * point cloud is an annotation layer too, and culling one a few slices from the
  * current slice would take a working feature away from the people using it.
  *
- * ⚠️ Driven by layersChanged rather than by prompt traffic. Arming it inside
- * getPromptAnnotationSource looked equivalent and is not: that function is only
- * reached when the panel draws, clears or restores a prompt, so a saved scene
+ * ⚠️ Driven by layersChanged rather than by prompt traffic. Arming it where a
+ * prompt is drawn looked equivalent and is not: that is only reached when the
+ * panel draws, clears or restores a prompt, so a saved scene
  * reopened with prompt layers already in it and never touched would render them
  * unfaded for the whole session -- the exact bug this fade exists to fix,
  * silently unfixed in the one case nobody would think to test.
@@ -394,31 +376,11 @@ function armPromptLayerFade(viewer: any): void {
   }
 }
 
-function getPromptAnnotationSource(viewer: any, kind: SeedLayerKind): any {
+function createPromptLayer(viewer: any, kind: SeedLayerKind): void {
   const spec = SEED_LAYERS[kind];
-  if (_promptSources[kind]) return _promptSources[kind];
-  if (!viewer?.layerManager?.managedLayers) return null;
-
-  // Look for existing layer (may have been created but source not yet ready)
-  for (const managedLayer of viewer.layerManager.managedLayers) {
-    if (managedLayer.name === spec.name) {
-      const source = managedLayer.layer?.localAnnotations;
-      if (source) {
-        _promptSources[kind] = source;
-        return source;
-      }
-      return null;
-    }
-  }
-
-  // Create new annotation layer only once per kind
-  if (_promptLayerCreated[kind]) return null;
-  _promptLayerCreated[kind] = true;
-
   try {
     const layerSpec = viewer.layerSpecification;
-    if (!layerSpec) return null;
-
+    if (!layerSpec) return;
     const managedLayer = makeLayer(layerSpec, spec.name, {
       type: "annotation",
       shader: seedLayerShader(spec),
@@ -427,39 +389,55 @@ function getPromptAnnotationSource(viewer: any, kind: SeedLayerKind): any {
     console.log(`[prompt] created ${spec.name} annotation layer`);
   } catch (e) {
     console.warn(`[prompt] failed to create ${spec.name}:`, e);
-    _promptLayerCreated[kind] = false;
   }
-  return null;
 }
 
-// Add a finished prompt to its layer. The annotation source is created lazily
-// and is not ready on the very first prompt of a session, which is why the
-// point path already retried; the retry is shared here so a box or a scribble
-// drawn first is not the one that goes missing.
-function addPromptAnnotation(viewer: any, prompt: Prompt): void {
-  const annotations = promptAnnotations(viewer, prompt);
-  if (annotations.length === 0) return;
+// How often and how long to wait for a prompt layer that is missing or whose
+// annotation source is not ready (a new layer, or one the page just rebuilt).
+const PROMPT_REDRAW_INTERVAL_MS = 100;
+const PROMPT_REDRAW_TRIES = 100;
 
-  const put = (source: any) => {
-    for (const annotation of annotations) {
-      try {
-        source.add(annotation);
-      } catch (e) {
-        console.warn("[prompt] failed to add annotation:", e);
-      }
+let promptMirror: PromptLayerMirror<SeedLayerKind> | null = null;
+let promptRedrawTimer: ReturnType<typeof setTimeout> | null = null;
+
+function getPromptMirror(viewer: any): PromptLayerMirror<SeedLayerKind> {
+  promptMirror ??= new PromptLayerMirror<SeedLayerKind>({
+    kinds: SEED_LAYER_KINDS,
+    kindOf: seedLayerKind,
+    find: (kind) =>
+      viewer?.layerManager?.managedLayers
+        ? findPromptSource(
+            viewer.layerManager.managedLayers,
+            SEED_LAYERS[kind].name,
+          )
+        : null,
+    create: (kind) => createPromptLayer(viewer, kind),
+    annotationsOf: (prompt) => promptAnnotations(viewer, prompt),
+  });
+  return promptMirror;
+}
+
+// Show every prompt in promptData on its layer, now, and again every 100 ms
+// until each layer that has prompts is ready. The prompt layers are a drawing
+// of promptData (see PromptLayerMirror), so this is also what puts them back
+// after the page rebuilds them.
+function drawPrompts(viewer: any, delayMs = 0, triesLeft = PROMPT_REDRAW_TRIES): void {
+  if (promptRedrawTimer !== null) clearTimeout(promptRedrawTimer);
+  promptRedrawTimer = null;
+  const run = () => {
+    promptRedrawTimer = null;
+    if (getPromptMirror(viewer).sync(promptData)) {
+      safeRedraw(viewer);
+      return;
     }
+    if (triesLeft <= 1) {
+      console.warn("[prompt] a prompt layer was not ready; its prompts are not drawn");
+      return;
+    }
+    drawPrompts(viewer, PROMPT_REDRAW_INTERVAL_MS, triesLeft - 1);
   };
-
-  const kind = seedLayerKind(prompt);
-  const source = getPromptAnnotationSource(viewer, kind);
-  if (source) {
-    put(source);
-    return;
-  }
-  setTimeout(() => {
-    const retry = getPromptAnnotationSource(viewer, kind);
-    if (retry) put(retry);
-  }, 200);
+  if (delayMs === 0) run();
+  else promptRedrawTimer = setTimeout(run, delayMs);
 }
 
 function convertLength(value: number, fromUnit: string, toUnit: string): number {
@@ -738,11 +716,10 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
         // which it never is on the first click of a session. That dot then sat
         // at fixed pixels for the rest of the session unless a later retry
         // happened to clear the whole overlay, which is the same defect the
-        // boxes and scribbles had. addPromptAnnotation retries instead of
-        // drawing something wrong in the meantime.
-        addPromptAnnotation(viewer, prompt);
-
+        // boxes and scribbles had. drawPrompts retries instead of drawing
+        // something wrong in the meantime.
         promptData.push(prompt);
+        drawPrompts(viewer);
         finishCapture();
         window.parent.postMessage({ type: "prompt_complete", prompts: promptData }, "*");
       }
@@ -809,8 +786,8 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
           // back except the indicator that lives on it.
           if (lockedBBox) drawLockedRegionIndicator(ctx, canvas, viewer, lockedBBox);
         }
-        addPromptAnnotation(viewer, currentPrompt);
         promptData.push(currentPrompt);
+        drawPrompts(viewer);
         currentPrompt = null;
         finishCapture();
         safeRedraw(viewer);
@@ -1006,22 +983,14 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
       return;
     }
     if (type === "prompt_clear") {
-      // [BUG-016] Clear both NG annotation layers (positive + negative seed dots)
-      for (const kind of SEED_LAYER_KINDS) {
-        const source = getPromptAnnotationSource(viewer, kind);
-        if (source) {
-          try { source.clear(); } catch (e) {
-            console.warn("[prompt] failed to clear annotations:", e);
-          }
-        }
-      }
       // [BUG-016] Original canvas-only clearing (commented out):
       // ctx.clearRect(0, 0, canvas.width, canvas.height);
       // Canvas still needs clearing for any non-annotation overlays (locked bbox indicator)
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       promptData.length = 0;
-      // Reset cached annotation sources in case layers were removed
-      resetPromptLayerCache();
+      // [BUG-016] Empty both NG annotation layers (positive + negative seed dots)
+      getPromptMirror(viewer).invalidate();
+      drawPrompts(viewer);
       // Redraw locked indicator if view is locked
       if (lockedBBox) {
         drawLockedRegionIndicator(ctx, canvas, viewer, lockedBBox);
@@ -1031,16 +1000,8 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
     }
     if (type === "prompt_restore") {
       // [BUG-016] Restore seed dots from saved per-neuron data.
-      // Clear existing dots first
-      for (const kind of SEED_LAYER_KINDS) {
-        const source = getPromptAnnotationSource(viewer, kind);
-        if (source) {
-          try { source.clear(); } catch {}
-        }
-      }
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       promptData.length = 0;
-      resetPromptLayerCache();
       if (lockedBBox) {
         drawLockedRegionIndicator(ctx, canvas, viewer, lockedBBox);
       }
@@ -1057,8 +1018,10 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
         const prompt = promptFromPanel(p);
         if (!prompt) continue;
         promptData.push(prompt);
-        addPromptAnnotation(viewer, prompt);
       }
+      // Drawn from promptData, replacing whatever the layers held.
+      getPromptMirror(viewer).invalidate();
+      drawPrompts(viewer);
       safeRedraw(viewer);
       return;
     }
@@ -1528,6 +1491,12 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
   armPromptLayerFade(viewer);
   viewer?.layerManager?.layersChanged?.add?.(() => {
     armPromptLayerFade(viewer);
+    // The page replaces the viewer's whole state when it changes a layer
+    // setting, which rebuilds the prompt layers empty or removes them. A burst
+    // of these arrives for one rebuild, so wait for it to settle, then redraw
+    // the prompts from promptData. Also when the list is empty: a rebuilt
+    // layer can come back with the dots it was saved with.
+    drawPrompts(viewer, PROMPT_REDRAW_INTERVAL_MS);
   });
 
   // -- Resize observer for locked region indicator --------------------------
