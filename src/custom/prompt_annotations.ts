@@ -156,7 +156,8 @@ export interface PromptLayerEnv<K extends string> {
  * `sync` compares what each layer holds (which source, how many prompts) with
  * the list and redraws whatever differs, so it can be called after anything
  * that may have rebuilt the layers. It returns false while a layer that has
- * prompts to show is missing or not ready, and the caller tries again.
+ * prompts to show is missing, or any prompt layer is not ready, and the caller
+ * tries again.
  */
 export class PromptLayerMirror<K extends string> {
   private drawn = new Map<K, { source: any; count: number }>();
@@ -173,10 +174,18 @@ export class PromptLayerMirror<K extends string> {
     for (const kind of this.env.kinds) {
       const want = prompts.filter((p) => this.env.kindOf(p) === kind);
       const source = this.env.find(kind);
-      if (source === undefined || source === null) {
+      if (source === undefined) {
         this.drawn.delete(kind);
         if (want.length === 0) continue;
-        if (source === undefined) this.env.create(kind);
+        this.env.create(kind);
+        complete = false;
+        continue;
+      }
+      if (source === null) {
+        // The layer is there but its source is not. A rebuilt layer can come
+        // back holding the dots it was saved with, so wait for it even when
+        // there is nothing to draw: the next sync empties it.
+        this.drawn.delete(kind);
         complete = false;
         continue;
       }

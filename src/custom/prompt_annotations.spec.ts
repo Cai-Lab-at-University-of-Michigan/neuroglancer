@@ -17,7 +17,6 @@ import {
   findPromptSource,
   makeAnnotationPoint,
   mouseInDataBounds,
-  PromptLayerMirror,
   pointFromMouseState,
   PromptLayerMirror,
   promptAnnotations,
@@ -583,6 +582,27 @@ describe("PromptLayerMirror", () => {
     layers.set("pos", fresh);
     expect(mirror.sync(prompts)).toBe(true);
     expect(fresh.held).toEqual([1]);
+  });
+
+  it("waits for a layer that exists but has no source yet, even with nothing to draw", () => {
+    const { layers, mirror } = setup();
+    layers.set("pos", null);
+    expect(mirror.sync([])).toBe(false);
+  });
+
+  it("empties a rebuilt source that comes back with the saved dots after the list was emptied", () => {
+    // Save clears the list, but the page rebuilds the layer from a state that
+    // still has the old dots; the layer is not ready when the clear arrives.
+    const { layers, mirror } = setup();
+    layers.set("pos", makeSource());
+    mirror.sync([point("positive", 1)]);
+    layers.set("pos", null);
+    expect(mirror.sync([])).toBe(false);
+    const back = makeSource();
+    back.held.push(1, 2);
+    layers.set("pos", back);
+    expect(mirror.sync([])).toBe(true);
+    expect(back.held).toEqual([]);
   });
 
   it("creates nothing for a kind that has no prompts", () => {

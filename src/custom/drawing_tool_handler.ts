@@ -1494,8 +1494,9 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
     // The page replaces the viewer's whole state when it changes a layer
     // setting, which rebuilds the prompt layers empty or removes them. A burst
     // of these arrives for one rebuild, so wait for it to settle, then redraw
-    // the prompts from promptData.
-    if (promptData.length > 0) drawPrompts(viewer, PROMPT_REDRAW_INTERVAL_MS);
+    // the prompts from promptData. Also when the list is empty: a rebuilt
+    // layer can come back with the dots it was saved with.
+    drawPrompts(viewer, PROMPT_REDRAW_INTERVAL_MS);
   });
 
   // -- Resize observer for locked region indicator --------------------------
