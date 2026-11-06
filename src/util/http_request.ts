@@ -90,6 +90,28 @@ export function pickDelay(attemptNumber: number): number {
   );
 }
 
+// A network error (`HttpError` with `status` 0) is tried at most this many times in all.  The
+// browser reports a reset connection and a CORS failure the same way, and a CORS failure (for
+// example a 404 sent without CORS headers) fails every time, so this stays small.
+const maxNetworkErrorAttempts = 3;
+const minNetworkErrorDelayMilliseconds = 250;
+
+export function pickNetworkErrorDelay(retryNumber: number): number {
+  // If `retryNumber == 0`, delay is a random number of milliseconds between
+  // `[minNetworkErrorDelayMilliseconds, minNetworkErrorDelayMilliseconds*2]`.  The interval doubles
+  // with each successive retry.
+  return (
+    2 ** retryNumber * minNetworkErrorDelayMilliseconds * (1 + Math.random())
+  );
+}
+
+function isRepeatableRequest(input: RequestInfo, init?: RequestInit) {
+  const method = (
+    init?.method ?? (typeof input === "string" ? "GET" : input.method)
+  ).toUpperCase();
+  return method === "GET" || method === "HEAD";
+}
+
 /**
  * Issues a `fetch` request.
  *
@@ -97,18 +119,34 @@ export function pickDelay(attemptNumber: number): number {
  * request fails due to a network or CORS restriction, throws an `HttpError` with a `status` of `0`.
  *
  * If the request fails due to a transient error (429, 503, 504), retry.
+ *
+ * If a GET or HEAD request fails due to a network error (a reset connection, for example), try it
+ * again, `maxNetworkErrorAttempts` times in all, waiting `pickNetworkErrorDelay` between attempts.
  */
 export async function fetchOk(
   input: RequestInfo,
   init?: RequestInitWithProgress,
 ): Promise<Response> {
+  let networkErrorAttempt = 0;
   for (let requestAttempt = 0; ; ) {
     init?.signal?.throwIfAborted();
     let response: Response;
     try {
       response = await fetch(input, init);
     } catch (error) {
-      throw HttpError.fromRequestError(input, error);
+      const httpError = HttpError.fromRequestError(input, error);
+      if (
+        httpError instanceof HttpError &&
+        httpError.status === 0 &&
+        isRepeatableRequest(input, init) &&
+        ++networkErrorAttempt < maxNetworkErrorAttempts
+      ) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, pickNetworkErrorDelay(networkErrorAttempt - 1)),
+        );
+        continue;
+      }
+      throw httpError;
     }
     if (!response.ok) {
       const { status } = response;
@@ -141,6 +179,7 @@ export type FetchOk = (
 export function isNotFoundError(e: any) {
   if (!(e instanceof HttpError)) return false;
   // Treat CORS errors (0) or 403 as not found.  S3 returns 403 if the file does not exist because
-  // permissions are per-file.
+  // permissions are per-file.  A GET or HEAD request that fails with 0 has already been tried
+  // `maxNetworkErrorAttempts` times by `fetchOk` (a CORS error cannot be told from a network error).
   return e.status === 0 || e.status === 403 || e.status === 404;
 }
