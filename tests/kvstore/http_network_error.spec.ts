@@ -31,7 +31,11 @@ import {
   expect,
   test,
 } from "vitest";
-import { fetchOk, HttpError } from "#src/util/http_request.js";
+import {
+  fetchOk,
+  HttpError,
+  pickNetworkErrorDelay,
+} from "#src/util/http_request.js";
 import { sharedKvStoreContextFixture } from "#tests/fixtures/shared_kvstore_context.js";
 
 const CHUNK_BYTES = "chunk-bytes";
@@ -143,4 +147,15 @@ describe("network errors on a chunk read", () => {
     expect((error as HttpError).status).toBe(0);
     expect(requestCounts.get("/post")).toBe(1);
   });
+});
+
+test("the wait before a repeat is 250 to 500 ms, then 500 to 1000 ms", () => {
+  for (let i = 0; i < 100; ++i) {
+    const first = pickNetworkErrorDelay(0);
+    expect(first).toBeGreaterThanOrEqual(250);
+    expect(first).toBeLessThanOrEqual(500);
+    const second = pickNetworkErrorDelay(1);
+    expect(second).toBeGreaterThanOrEqual(500);
+    expect(second).toBeLessThanOrEqual(1000);
+  }
 });
