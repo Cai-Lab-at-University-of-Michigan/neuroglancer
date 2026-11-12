@@ -9,7 +9,7 @@ import type {
 import {
   DRAFT_NOTICE_RPC_ID,
   DRAFT_UPDATE_RPC_ID,
-  draftMessage,
+  handleDraftWindowMessage,
   noticeForPage,
 } from "#src/custom/draft_route.js";
 import type { DrawingTool } from "#src/custom/drawing_tool.js";
@@ -944,34 +944,20 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
     // The page tells the viewer about the user's draft of a layer (see
     // draft_route.ts). The chunk worker keeps what it says and reads again
     // the chunks it names.
-    const draft = draftMessage(event.data);
-    if (draft !== undefined) {
-      const queue = viewer.chunkQueueManager;
-      queue
-        .rpc!.promiseInvoke<DraftUpdateResult>(
-          DRAFT_UPDATE_RPC_ID,
-          { queue: queue.rpcId, message: draft },
-          { signal: AbortSignal.timeout(SOFT_REFRESH_ABORT_AFTER_MS) },
-        )
-        .then((result) => {
-          if (result.gap) {
-            // A message before this one never arrived: ask for the whole draft.
-            window.parent.postMessage(
-              {
-                type: "draft_state_request",
-                layerItemId: draft.layerItemId,
-                location: draft.location,
-                have: result.have,
-                reason: "gap",
-              },
-              "*",
-            );
-          }
-          viewer.display.scheduleRedraw();
-        })
-        .catch((err: unknown) => {
-          console.error(`[${type}] could not apply the draft message:`, err);
-        });
+    const queue = viewer.chunkQueueManager;
+    if (
+      handleDraftWindowMessage(event, {
+        parent: window.parent,
+        invoke: (message) =>
+          queue.rpc!.promiseInvoke<DraftUpdateResult>(
+            DRAFT_UPDATE_RPC_ID,
+            { queue: queue.rpcId, message },
+            { signal: AbortSignal.timeout(SOFT_REFRESH_ABORT_AFTER_MS) },
+          ),
+        post: (message) => window.parent.postMessage(message, "*"),
+        redraw: () => viewer.display.scheduleRedraw(),
+      })
+    ) {
       return;
     }
     if (type === "drawing_mode_change") {

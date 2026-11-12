@@ -22,12 +22,16 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { DraftNotice } from "#src/custom/draft_route.js";
+import type {
+  DraftNotice,
+  DraftUpdateResult,
+} from "#src/custom/draft_route.js";
 import {
   applyDraftMessage,
   draftMessage,
   DraftRoutes,
   draftSkipsPrefetch,
+  handleDraftWindowMessage,
   draftRoutes,
   meets,
   noticeForPage,
@@ -221,15 +225,75 @@ describe("draft_state", () => {
     ).toBeDefined();
   });
 
-  it("is applied whatever its generation: a backend that restarted counts from the start again", () => {
+  it("does nothing when it is the state the viewer already has", () => {
+    const { routes } = setup();
+    withState(routes, 5, [
+      [0, 0, 0],
+      [0, 0, 1],
+    ]);
+    const again = withState(routes, 5, [
+      [0, 0, 1],
+      [0, 0, 0],
+    ]);
+    expect(again).toMatchObject({ ignored: true, gap: false, older: false });
+    expect(again.refresh.size).toBe(0);
+    // The same generation with other regions is not that state: it is applied.
+    const other = withState(routes, 5, [[0, 0, 0]]);
+    expect(other.ignored).toBe(false);
+    expect(other.refresh.size).toBe(5);
+  });
+
+  it("leaves an older state alone and asks again, so the newest stroke stays on the draft route", () => {
+    const { routes } = setup();
+    withState(routes, 1, [[0, 0, 0]]);
+    // A stroke in a region the draft had not touched: x 128..160.
+    routes.apply({
+      kind: "changed",
+      ...LAYER,
+      generation: 2,
+      prev: 1,
+      changed: { "1": [[0, 0, 4]] },
+    });
+    // The state read before that stroke arrives after it.
+    const late = withState(routes, 1, [[0, 0, 0]]);
+    expect(late).toMatchObject({ ignored: true, older: true, have: 2 });
+    expect(late.refresh.size).toBe(0);
+    expect(routes.routes.get("u1/seg")!.generation).toBe(2);
+    expect(routes.request(`${CDN}/1/`, [128, 0, 0], [32, 32, 32])?.url).toBe(
+      `${BASE}/1/128-160_0-32_0-32?gen=2`,
+    );
+  });
+
+  it("believes an older state the second time: a backend that restarted counts from the start again", () => {
     const { routes } = setup();
     withState(routes, 40);
-    const applied = withState(routes, 0, []);
-    expect(applied.ignored).toBe(false);
+    expect(withState(routes, 0, [])).toMatchObject({
+      ignored: true,
+      older: true,
+    });
+    const second = withState(routes, 0, []);
+    expect(second).toMatchObject({ ignored: false, older: false });
     expect(routes.routes.get("u1/seg")!.generation).toBe(0);
     expect(
       routes.request(`${CDN}/1/`, [0, 0, 0], [32, 32, 32]),
     ).toBeUndefined();
+    // Strokes of the new count are applied again.
+    const stroke = routes.apply({
+      kind: "changed",
+      ...LAYER,
+      generation: 1,
+      prev: 0,
+      changed: { "1": [[0, 0, 0]] },
+    });
+    expect(stroke).toMatchObject({ ignored: false, gap: false });
+  });
+
+  it("starts over after a state that is not older: the next older one is left alone again", () => {
+    const { routes } = setup();
+    withState(routes, 5);
+    expect(withState(routes, 3).older).toBe(true);
+    expect(withState(routes, 5).ignored).toBe(true);
+    expect(withState(routes, 3)).toMatchObject({ ignored: true, older: true });
   });
 });
 
@@ -398,6 +462,45 @@ describe("reading a draft chunk", () => {
     withState(routes, 6);
     await routes.read(`${CDN}/1/`, [0, 0, 0], [32, 32, 32], signal);
     expect(notices.map((n) => n.kind)).toEqual(["refused", "refused"]);
+  });
+
+  it("reads again after a 503, as a read of the CDN does, and hands back the data", async () => {
+    const { routes, notices } = setup();
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(answer(503))
+      .mockResolvedValueOnce(answer(200, 5));
+    vi.stubGlobal("fetch", fetch);
+    withState(routes);
+    const reading = routes.read(
+      `${CDN}/1/`,
+      [0, 0, 0],
+      [32, 32, 32],
+      new AbortController().signal,
+    );
+    await vi.advanceTimersByTimeAsync(2000);
+    expect((await reading)?.byteLength).toBe(4);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(notices).toEqual([]);
+  });
+
+  it("reads again after a network error, and hands back the data", async () => {
+    const { routes } = setup();
+    const fetch = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValueOnce(answer(200, 5));
+    vi.stubGlobal("fetch", fetch);
+    withState(routes);
+    const reading = routes.read(
+      `${CDN}/1/`,
+      [0, 0, 0],
+      [32, 32, 32],
+      new AbortController().signal,
+    );
+    await vi.advanceTimersByTimeAsync(1000);
+    expect((await reading)?.byteLength).toBe(4);
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 
   it("fails the read on an answer that is neither data nor a refusal", async () => {
@@ -674,6 +777,7 @@ describe("applyDraftMessage", () => {
       expect(result).toEqual({
         ignored: false,
         gap: false,
+        older: false,
         have: 5,
         refreshed: 4,
         skipped: 0,
@@ -747,6 +851,22 @@ describe("applyDraftMessage", () => {
     expect(order).toEqual(["priorities", "chunks"]);
   });
 
+  it("a repeat of the state the viewer has reads nothing", async () => {
+    const { routes } = setup();
+    withState(routes, 5);
+    const queue = queueOf([source(1, [256, 256, 1], [[0, 0, 0]])]);
+
+    const result = await applyDraftMessage(
+      queue,
+      { kind: "state", ...LAYER, generation: 5, regions: [[0, 0, 0]] },
+      signal,
+      routes,
+    );
+
+    expect(result).toMatchObject({ ignored: true, older: false, refreshed: 0 });
+    expect(queue.invalidateCachedChunks).not.toHaveBeenCalled();
+  });
+
   it("a release, a duplicate and an old copy read nothing", async () => {
     const { routes } = setup();
     withState(routes, 5);
@@ -798,6 +918,117 @@ describe("applyDraftMessage", () => {
       routes,
     );
     expect(result).toMatchObject({ gap: true, have: 5 });
+  });
+});
+
+describe("handleDraftWindowMessage", () => {
+  const page = {};
+  const stroke = {
+    type: "draft_changed",
+    ...LAYER,
+    generation: 4,
+    prev: 3,
+    changed: { "1": [[0, 0, 0]] },
+  };
+  function env(result: Partial<DraftUpdateResult> = {}) {
+    const posted: object[] = [];
+    const e = {
+      parent: page,
+      invoke: vi.fn(async () => ({
+        ignored: false,
+        gap: false,
+        older: false,
+        have: 3,
+        refreshed: 0,
+        skipped: 0,
+        failed: 0,
+        dropped: 0,
+        ...result,
+      })),
+      post: (m: object) => posted.push(m),
+      redraw: vi.fn(),
+    };
+    return { e, posted };
+  }
+
+  it("hands a draft message of the embedding page to the worker and redraws", async () => {
+    const { e, posted } = env();
+    expect(handleDraftWindowMessage({ data: stroke, source: page }, e)).toBe(
+      true,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(e.invoke).toHaveBeenCalledTimes(1);
+    expect(e.invoke.mock.calls[0]).toEqual([
+      {
+        kind: "changed",
+        ...LAYER,
+        generation: 4,
+        prev: 3,
+        changed: { "1": [[0, 0, 0]] },
+      },
+    ]);
+    expect(posted).toEqual([]);
+    expect(e.redraw).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not act on a draft message from any other window", async () => {
+    const { e, posted } = env();
+    expect(handleDraftWindowMessage({ data: stroke, source: {} }, e)).toBe(
+      true,
+    );
+    expect(handleDraftWindowMessage({ data: stroke, source: null }, e)).toBe(
+      true,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(e.invoke).not.toHaveBeenCalled();
+    expect(posted).toEqual([]);
+  });
+
+  it("leaves every other message to the rest of the listener", () => {
+    const { e } = env();
+    expect(
+      handleDraftWindowMessage(
+        { data: { type: "invalidate_chunks" }, source: page },
+        e,
+      ),
+    ).toBe(false);
+    expect(e.invoke).not.toHaveBeenCalled();
+  });
+
+  it("asks the page for the whole state after a gap", async () => {
+    const { e, posted } = env({ gap: true, have: 2 });
+    handleDraftWindowMessage({ data: stroke, source: page }, e);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(posted).toEqual([
+      {
+        type: "draft_state_request",
+        layerItemId: "layer-1",
+        location: "u1/seg",
+        have: 2,
+        reason: "gap",
+      },
+    ]);
+  });
+
+  it("asks the page again after a state that was older than what the viewer has", async () => {
+    const { e, posted } = env({ ignored: true, older: true, have: 7 });
+    handleDraftWindowMessage(
+      {
+        data: { type: "draft_state", ...LAYER, generation: 6, regions: [] },
+        source: page,
+      },
+      e,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(posted).toEqual([
+      {
+        type: "draft_state_request",
+        layerItemId: "layer-1",
+        location: "u1/seg",
+        have: 7,
+        reason: "older",
+      },
+    ]);
   });
 });
 

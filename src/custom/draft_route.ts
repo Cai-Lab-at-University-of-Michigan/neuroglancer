@@ -23,7 +23,7 @@
  *
  * The page tells the viewer what the draft covers with three messages:
  *   draft_state     the whole draft: its generation and the regions it
- *                   touches. Always safe to apply again.
+ *                   touches. Safe to send again: a repeat does nothing.
  *   draft_changed   what one write, undo or redo changed.
  *   draft_released  a Save put these regions into the layer.
  * The messages carry no voxels. Everything here is kept in the chunk worker's
@@ -33,6 +33,8 @@
  * A viewer that has received none of these messages reads every chunk from
  * the CDN, exactly as it did before this file existed.
  */
+
+import { fetchOk, HttpError } from "#src/util/http_request.js";
 
 /** Levels the draft route serves: the scale keys of a segmentation layer. */
 const LEVELS = [1, 2, 4, 8, 16];
@@ -111,6 +113,8 @@ export interface DraftRoute extends LayerFields {
   aheadTimer: ReturnType<typeof setTimeout> | undefined;
   /** Refusals the page has been told about since the last draft_state. */
   refused: Set<number>;
+  /** The last draft_state was older than `generation` and was left alone. */
+  olderStateSeen: boolean;
 }
 
 export interface DraftApplied {
@@ -118,6 +122,8 @@ export interface DraftApplied {
   ignored: boolean;
   /** The message does not follow the generation the viewer had: one was lost. */
   gap: boolean;
+  /** A draft_state older than what the viewer has was left alone: ask again. */
+  older: boolean;
   /** The generation the viewer had before this message. */
   have: number;
   /** Level -> what to read again at that level. */
@@ -220,6 +226,7 @@ export class DraftRoutes {
         ahead: -1,
         aheadTimer: undefined,
         refused: new Set(),
+        olderStateSeen: false,
       };
       this.routes.set(message.location, route);
     }
@@ -227,6 +234,7 @@ export class DraftRoutes {
     const applied: DraftApplied = {
       ignored: false,
       gap: false,
+      older: false,
       have,
       refresh: new Map(),
     };
@@ -234,10 +242,35 @@ export class DraftRoutes {
       applied.ignored = true;
       return applied;
     }
-    route.layerItemId = message.layerItemId;
-    if (message.kind !== "released") route.base = trimSlashes(message.base);
     const regionKeys = (regions: number[][]) =>
       regions.map(([z, y, x]) => DraftRoutes.key(z, y, x));
+    if (message.kind === "state") {
+      if (message.generation === have) {
+        // The state the viewer has already (a poll's answer, say): reading
+        // every touched chunk again would be the whole view once more.
+        const regions = new Set(regionKeys(message.regions));
+        if (
+          regions.size === route.touched.size &&
+          [...regions].every((key) => route.touched.has(key))
+        ) {
+          route.olderStateSeen = false;
+          applied.ignored = true;
+          return applied;
+        }
+      } else if (message.generation < have && !route.olderStateSeen) {
+        // Read before a change the viewer has since been told about: applying
+        // it would send the newest stroke's chunks back to the CDN. But a
+        // backend that restarted counts from 0 again, so the page is asked
+        // once more, and an older state that comes a second time is believed.
+        route.olderStateSeen = true;
+        applied.ignored = true;
+        applied.older = true;
+        return applied;
+      }
+      route.olderStateSeen = false;
+    }
+    route.layerItemId = message.layerItemId;
+    if (message.kind !== "released") route.base = trimSlashes(message.base);
 
     if (message.kind === "state") {
       // The whole draft. Chunks of a region it no longer holds go back to the
@@ -343,29 +376,36 @@ export class DraftRoutes {
   ): Promise<ArrayBuffer | undefined> {
     // The viewer and the API are one origin on a site and two ports of
     // localhost in development; "include" sends the sign-in cookie to both.
-    const response = await fetch(url, {
-      signal,
-      credentials: "include",
-    });
-    if (response.ok) {
-      const generation = Number(response.headers.get("X-Draft-Generation"));
-      if (generation > route.generation) this.sawAhead(route, generation);
-      return await response.arrayBuffer();
+    // Read as the CDN is read: `fetchOk` tries again after 429, 503, 504 and
+    // after a network error. A read that fails for good leaves the chunk
+    // failed, and nothing reads a failed chunk again.
+    let response: Response;
+    try {
+      response = await fetchOk(url, { signal, credentials: "include" });
+    } catch (error) {
+      if (!(error instanceof HttpError) || !REFUSALS.has(error.status)) {
+        throw error;
+      }
+      this.refused(route, error.status);
+      return undefined;
     }
-    if (!REFUSALS.has(response.status)) {
-      throw new Error(`draft chunk: HTTP ${response.status}`);
-    }
+    const generation = Number(response.headers.get("X-Draft-Generation"));
+    if (generation > route.generation) this.sawAhead(route, generation);
+    return await response.arrayBuffer();
+  }
+
+  /** The route refused a chunk: the page is told once for each status. */
+  private refused(route: DraftRoute, status: number) {
     // No state request here: the same read would be refused again.
-    if (!route.refused.has(response.status)) {
-      route.refused.add(response.status);
+    if (!route.refused.has(status)) {
+      route.refused.add(status);
       this.notify({
         kind: "refused",
         layerItemId: route.layerItemId,
         location: route.location,
-        status: response.status,
+        status,
       });
     }
-    return undefined;
   }
 
   /** An answer is newer than the last message: give that message a second. */
@@ -443,6 +483,7 @@ export function draftSkipsPrefetch(
 export interface DraftUpdateResult {
   ignored: boolean;
   gap: boolean;
+  older: boolean;
   have: number;
   /** Chunks on screen that were read again and replaced in place. */
   refreshed: number;
@@ -493,6 +534,7 @@ export async function applyDraftMessage(
   const result: DraftUpdateResult = {
     ignored: applied.ignored,
     gap: applied.gap,
+    older: applied.older,
     have: applied.have,
     refreshed: 0,
     skipped: 0,
@@ -618,4 +660,54 @@ export function noticeForPage(notice: DraftNotice) {
     have: notice.have,
     reason: "behind",
   };
+}
+
+/** What the page-side handling of a draft message needs from the viewer. */
+export interface DraftPageEnv {
+  /** The window that embeds the viewer: the only sender that is listened to. */
+  parent: unknown;
+  /** Hands the message to the chunk worker. */
+  invoke(message: DraftMessage): Promise<DraftUpdateResult>;
+  /** Posts to the embedding page. */
+  post(message: object): void;
+  redraw(): void;
+}
+
+/**
+ * The viewer's `message` listener calls this first. True when the event was a
+ * draft message, whether or not it was acted on.
+ *
+ * Only the embedding page is listened to: a draft message names a URL that
+ * the worker then reads with the user's cookie.
+ *
+ * The worker's answer says when the page has to send the whole draft again:
+ * a message before this one never arrived (`gap`), or the state it sent is
+ * older than what the viewer has (`older`).
+ */
+export function handleDraftWindowMessage(
+  event: { data: unknown; source: unknown },
+  env: DraftPageEnv,
+): boolean {
+  const message = draftMessage(event.data);
+  if (message === undefined) return false;
+  if (event.source !== env.parent) return true;
+  env
+    .invoke(message)
+    .then((result) => {
+      const reason = result.gap ? "gap" : result.older ? "older" : undefined;
+      if (reason !== undefined) {
+        env.post({
+          type: "draft_state_request",
+          layerItemId: message.layerItemId,
+          location: message.location,
+          have: result.have,
+          reason,
+        });
+      }
+      env.redraw();
+    })
+    .catch((err: unknown) => {
+      console.error("could not apply a draft message:", err);
+    });
+  return true;
 }
