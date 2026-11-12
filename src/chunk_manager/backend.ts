@@ -16,6 +16,7 @@
 
 import { throttle } from "lodash-es";
 import type {
+  ChunksInvalidateResult,
   ChunkSourceParametersConstructor,
   ChunkSourceRefreshResult,
   LayerChunkProgressInfo,
@@ -43,6 +44,16 @@ import {
   runRefresh,
   Slots,
 } from "#src/chunk_manager/soft_refresh.js";
+import type {
+  DraftMessage,
+  DraftUpdateResult,
+} from "#src/custom/draft_route.js";
+import {
+  applyDraftMessage,
+  DRAFT_NOTICE_RPC_ID,
+  DRAFT_UPDATE_RPC_ID,
+  draftRoutes,
+} from "#src/custom/draft_route.js";
 import type { SharedWatchableValue } from "#src/shared_watchable_value.js";
 import type { TypedNumberArray } from "#src/util/array.js";
 import type { Borrowed, Disposable } from "#src/util/disposable.js";
@@ -774,6 +785,13 @@ export class ChunkQueueManager extends SharedObjectCounterpart {
   /** The newest refresh of each source; an older one steps aside for it. */
   private refreshGenerations = new WeakMap<ChunkSourceBase, number>();
 
+  /** The newest `invalidateCachedChunks` call for each chunk it is still reading, by key. */
+  private chunkGenerations = new WeakMap<
+    ChunkSourceBase,
+    Map<string, number>
+  >();
+  private chunkGeneration = 0;
+
   constructor(rpc: RPC, options: any) {
     super(rpc, options);
     const getCapacity = (capacity: any) => {
@@ -1238,18 +1256,42 @@ export class ChunkQueueManager extends SharedObjectCounterpart {
     for (const chunk of plan.evict) {
       this.evictChunk(chunk);
     }
+    const outcome = await this.replaceInPlace(
+      source,
+      plan.refresh,
+      () => this.refreshGenerations.get(source) === generation,
+      signal,
+    );
+    return {
+      ...outcome,
+      fellBack: false,
+      superseded: this.refreshGenerations.get(source) !== generation,
+    };
+  }
+
+  /**
+   * Reads `chunks`, which are on the GPU, again and replaces each in one step
+   * when its new data is here. `isMine` says whether the caller is still the
+   * newest one to refresh a chunk; a chunk that is someone else's by then is
+   * left to them.
+   */
+  private async replaceInPlace(
+    source: ChunkSourceBase & FreshReadSource,
+    chunks: Chunk[],
+    isMine: (chunk: Chunk) => boolean,
+    signal: AbortSignal,
+  ) {
     // Chunk objects are recycled, so a chunk is only the one planned while it
     // still has the key it had then.
     const keys = new Map<Chunk, string>();
-    for (const chunk of plan.refresh) {
+    for (const chunk of chunks) {
       keys.set(chunk, chunk.key!);
     }
     const settled = new Set<Chunk>();
-    const isCurrent = (chunk: Chunk) =>
-      this.refreshGenerations.get(source) === generation &&
-      chunk.state === ChunkState.GPU_MEMORY &&
+    const isPlanned = (chunk: Chunk) =>
       chunk.key === keys.get(chunk) &&
-      source.chunks.get(chunk.key!) === chunk;
+      source.chunks.get(chunk.key!) === chunk &&
+      isMine(chunk);
     const ops: RefreshOps<Chunk, Chunk> = {
       readFresh: async (chunk, signal) => {
         const release = await this.refreshSlots.acquire(signal);
@@ -1261,7 +1303,8 @@ export class ChunkQueueManager extends SharedObjectCounterpart {
       },
       isEmpty: (fresh) => source.isFreshEmpty(fresh),
       hadData: (chunk) => chunk.gpuMemoryBytes > 0,
-      isCurrent,
+      isCurrent: (chunk) =>
+        chunk.state === ChunkState.GPU_MEMORY && isPlanned(chunk),
       swap: (chunk, fresh) => {
         this.sendFreshChunk(chunk, fresh, source.freshBytes(fresh));
         settled.add(chunk);
@@ -1273,37 +1316,88 @@ export class ChunkQueueManager extends SharedObjectCounterpart {
       wait: pause,
     };
     try {
-      const outcome = await runRefresh(plan.refresh, ops, {
+      return await runRefresh(chunks, ops, {
         signal,
         concurrency: SOFT_REFRESH_CONCURRENCY,
         rereadDelayMs: SOFT_REFRESH_REREAD_DELAY_MS,
       });
-      return {
-        ...outcome,
-        fellBack: false,
-        superseded: this.refreshGenerations.get(source) !== generation,
-      };
     } finally {
       // A chunk that was to be replaced and was not (cancelled, moved out of
       // GPU memory by the cache) must not keep its old data: drop it, so the
       // normal queue reads it from scratch. A newer refresh of the same
-      // source covers these chunks itself.
-      if (this.refreshGenerations.get(source) === generation) {
-        for (const chunk of plan.refresh) {
-          if (
-            settled.has(chunk) ||
-            chunk.key !== keys.get(chunk) ||
-            source.chunks.get(chunk.key!) !== chunk
-          ) {
-            continue;
-          }
-          switch (chunk.state) {
-            case ChunkState.GPU_MEMORY:
-            case ChunkState.SYSTEM_MEMORY:
-            case ChunkState.SYSTEM_MEMORY_WORKER:
-              this.evictChunk(chunk);
-          }
+      // chunk covers it itself.
+      for (const chunk of chunks) {
+        if (settled.has(chunk) || !isPlanned(chunk)) continue;
+        switch (chunk.state) {
+          case ChunkState.GPU_MEMORY:
+          case ChunkState.SYSTEM_MEMORY:
+          case ChunkState.SYSTEM_MEMORY_WORKER:
+            this.evictChunk(chunk);
         }
+      }
+    }
+  }
+
+  /**
+   * Reads the chunks of `source` named by `keys` again and leaves every other
+   * chunk of the source alone. A chunk a view shows stays until its new data
+   * has been read and is then replaced in one step, as in
+   * `refreshSourceCache`; any other chunk, one that was only read ahead
+   * included, is dropped and read from scratch when it is next needed.
+   *
+   * Each chunk has its own generation: calls for different chunks do not
+   * disturb each other, and of two calls for one chunk only the newer one's
+   * read is put on screen, whichever answers first.
+   */
+  async invalidateCachedChunks(
+    source: ChunkSourceBase,
+    keys: Iterable<string>,
+    signal: AbortSignal,
+  ): Promise<ChunksInvalidateResult> {
+    const named: Chunk[] = [];
+    for (const key of keys) {
+      const chunk = source.chunks.get(key);
+      if (chunk !== undefined) named.push(chunk);
+    }
+    const lazy = canReadFresh(source);
+    const plan = planRefresh(
+      lazy
+        ? named.filter(
+            (chunk) => chunk.priorityTier !== ChunkPriorityTier.PREFETCH,
+          )
+        : [],
+    );
+    const refresh = new Set(plan.refresh);
+    let dropped = 0;
+    for (const chunk of named) {
+      if (refresh.has(chunk) || chunk.state === ChunkState.NEW) continue;
+      this.evictChunk(chunk);
+      ++dropped;
+    }
+    if (!lazy || plan.refresh.length === 0) {
+      return { refreshed: 0, skipped: 0, failed: 0, dropped };
+    }
+    let generations = this.chunkGenerations.get(source);
+    if (generations === undefined) {
+      generations = new Map();
+      this.chunkGenerations.set(source, generations);
+    }
+    const generation = ++this.chunkGeneration;
+    const planned = plan.refresh.map((chunk) => chunk.key!);
+    for (const key of planned) {
+      generations.set(key, generation);
+    }
+    try {
+      const outcome = await this.replaceInPlace(
+        source,
+        plan.refresh,
+        (chunk) => generations.get(chunk.key!) === generation,
+        signal,
+      );
+      return { ...outcome, dropped };
+    } finally {
+      for (const key of planned) {
+        if (generations.get(key) === generation) generations.delete(key);
       }
     }
   }
@@ -1568,6 +1662,19 @@ registerPromiseRPC(
       signal!,
     );
     return { value };
+  },
+);
+
+// The page's draft messages (see `draft_route.ts`), handed on by the frontend.
+registerPromiseRPC(
+  DRAFT_UPDATE_RPC_ID,
+  async function (
+    x: { queue: number; message: DraftMessage },
+    { signal },
+  ): RPCPromise<DraftUpdateResult> {
+    const queue = this.get(x.queue) as ChunkQueueManager;
+    draftRoutes.notify = (notice) => this.invoke(DRAFT_NOTICE_RPC_ID, notice);
+    return { value: await applyDraftMessage(queue, x.message, signal!) };
   },
 );
 

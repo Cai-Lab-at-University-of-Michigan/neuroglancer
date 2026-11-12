@@ -116,6 +116,18 @@ export interface ChunkSourceRefreshResult {
   superseded: boolean;
 }
 
+/** What `ChunkQueueManager.invalidateCachedChunks` did with the chunks it was given. */
+export interface ChunksInvalidateResult {
+  /** Chunks on screen that were read again and replaced in place. */
+  refreshed: number;
+  /** Chunks a newer call took over, or that left the GPU before their new data came. */
+  skipped: number;
+  /** Chunks whose read failed; each was dropped. */
+  failed: number;
+  /** Chunks that were not on screen and were dropped, to be read from scratch when needed. */
+  dropped: number;
+}
+
 export const REQUEST_CHUNK_STATISTICS_RPC_ID =
   "ChunkQueueManager.requestChunkStatistics";
 
