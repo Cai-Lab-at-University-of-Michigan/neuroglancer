@@ -295,6 +295,27 @@ describe("draft_state", () => {
     expect(withState(routes, 5).ignored).toBe(true);
     expect(withState(routes, 3)).toMatchObject({ ignored: true, older: true });
   });
+
+  it("starts over after a newer state was applied: a late one after it is left alone, not believed", () => {
+    const { routes } = setup();
+    withState(routes, 5);
+    // A late state, the viewer asks, and the answer is newer than what it has.
+    expect(withState(routes, 3).older).toBe(true);
+    expect(withState(routes, 7, [[0, 0, 1]])).toMatchObject({
+      ignored: false,
+      older: false,
+    });
+    // Another late state: it is the first older one again.
+    const late = withState(routes, 6, [[0, 0, 0]]);
+    expect(late).toMatchObject({ ignored: true, older: true, have: 7 });
+    expect(routes.routes.get("u1/seg")!.generation).toBe(7);
+    expect(
+      routes.request(`${CDN}/1/`, [128, 0, 0], [32, 32, 32]),
+    ).toBeDefined();
+    expect(
+      routes.request(`${CDN}/1/`, [0, 0, 0], [32, 32, 32]),
+    ).toBeUndefined();
+  });
 });
 
 describe("draft_changed", () => {
