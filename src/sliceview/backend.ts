@@ -27,6 +27,7 @@ import {
   withChunkManager,
 } from "#src/chunk_manager/backend.js";
 import { ChunkPriorityTier, ChunkState } from "#src/chunk_manager/base.js";
+import { draftSkipsPrefetch } from "#src/custom/draft_route.js";
 import type { DisplayDimensionRenderInfo } from "#src/navigation_state.js";
 import type { SharedWatchableValue } from "#src/shared_watchable_value.js";
 import type {
@@ -220,6 +221,12 @@ export class SliceViewBackend extends SliceViewIntermediateBase {
               curPositionInChunks[chunkDim] = oldIndex;
               if (chunk.markGeneration === curMarkGeneration) {
                 j = jumpOffset;
+                continue;
+              }
+              // A chunk the draft route would compute at a coarse level is
+              // read when a view shows it, not ahead of time.
+              if (draftSkipsPrefetch(tsource.source, chunk.chunkGridPosition)) {
+                j += PREFETCH_ENTRY_SIZE;
                 continue;
               }
               chunkManager.requestChunk(

@@ -32,6 +32,7 @@ import {
   annotationTypes,
 } from "#src/annotation/index.js";
 import { WithParameters } from "#src/chunk_manager/backend.js";
+import { draftRoutes } from "#src/custom/draft_route.js";
 import {
   AnnotationSourceParameters,
   AnnotationSpatialIndexSourceParameters,
@@ -136,17 +137,38 @@ export class PrecomputedVolumeChunkSource extends WithParameters(
     if (shardedKvStore === undefined) {
       const { kvStore } = this;
       let path: string;
+      let draftRead: Promise<ArrayBuffer | undefined> | undefined;
       {
         // chunkPosition must not be captured, since it will be invalidated by the next call to
         // computeChunkBounds.
         const chunkPosition = this.computeChunkBounds(chunk);
         const chunkDataSize = chunk.chunkDataSize!;
+        // A chunk a user's draft may cover is read from the backend's draft
+        // route, with the same box the CDN is asked for; the route answers
+        // raw voxels. The request is made from chunkPosition before anything
+        // is awaited.
+        if (this.parameters.encoding === VolumeChunkEncoding.RAW) {
+          draftRead = draftRoutes.read(
+            this.parameters.url,
+            chunkPosition,
+            chunkDataSize,
+            signal,
+          );
+        }
         path =
           `${kvStore.path}${chunkPosition[0]}-${
             chunkPosition[0] + chunkDataSize[0]
           }_` +
           `${chunkPosition[1]}-${chunkPosition[1] + chunkDataSize[1]}_` +
           `${chunkPosition[2]}-${chunkPosition[2] + chunkDataSize[2]}`;
+      }
+      if (draftRead !== undefined) {
+        const draft = await draftRead;
+        if (draft !== undefined) {
+          await this.chunkDecoder(chunk, signal, draft);
+          return;
+        }
+        // Not served by the draft route after all: the saved layer is shown.
       }
       readResponse = await kvStore.store.read(path, { signal });
     } else {

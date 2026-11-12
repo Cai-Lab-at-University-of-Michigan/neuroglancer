@@ -2,12 +2,23 @@ import {
   sliceFadeCurve,
   sliceFadeSlices,
 } from "#src/annotation/slice_fade.js";
+import type {
+  DraftNotice,
+  DraftUpdateResult,
+} from "#src/custom/draft_route.js";
+import {
+  DRAFT_NOTICE_RPC_ID,
+  DRAFT_UPDATE_RPC_ID,
+  draftMessage,
+  noticeForPage,
+} from "#src/custom/draft_route.js";
 import type { DrawingTool } from "#src/custom/drawing_tool.js";
 import type { ViewerLike } from "#src/custom/layer_reload.js";
 import {
   DraftHider,
   pageEnv,
   RunningRefreshes,
+  SOFT_REFRESH_ABORT_AFTER_MS,
   softInvalidateRequest,
   startSoftInvalidate,
 } from "#src/custom/layer_reload.js";
@@ -39,6 +50,7 @@ import {
 } from "#src/custom/prompt_annotations.js";
 import { resetView } from "#src/custom/reset_view.js";
 import { makeLayer } from "#src/layer/index.js";
+import { registerRPC } from "#src/worker_rpc.js";
 
 interface BaseStroke {
   mode: string;
@@ -573,6 +585,12 @@ function sendBuildInfo(parent: Window) {
   );
 }
 
+// What the chunk worker noticed while reading a draft chunk: the page's last
+// draft message is missing, or the draft route refused a chunk.
+registerRPC(DRAFT_NOTICE_RPC_ID, (notice: DraftNotice) => {
+  window.parent.postMessage(noticeForPage(notice), "*");
+});
+
 export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
   const { canvas, ctx, viewer } = drawingTool;
   const container = viewer.display.container as HTMLElement;
@@ -921,6 +939,39 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
 
     if (type === "screenshot") {
       viewer.screenshotManager.takeScreenshot();
+      return;
+    }
+    // The page tells the viewer about the user's draft of a layer (see
+    // draft_route.ts). The chunk worker keeps what it says and reads again
+    // the chunks it names.
+    const draft = draftMessage(event.data);
+    if (draft !== undefined) {
+      const queue = viewer.chunkQueueManager;
+      queue
+        .rpc!.promiseInvoke<DraftUpdateResult>(
+          DRAFT_UPDATE_RPC_ID,
+          { queue: queue.rpcId, message: draft },
+          { signal: AbortSignal.timeout(SOFT_REFRESH_ABORT_AFTER_MS) },
+        )
+        .then((result) => {
+          if (result.gap) {
+            // A message before this one never arrived: ask for the whole draft.
+            window.parent.postMessage(
+              {
+                type: "draft_state_request",
+                layerItemId: draft.layerItemId,
+                location: draft.location,
+                have: result.have,
+                reason: "gap",
+              },
+              "*",
+            );
+          }
+          viewer.display.scheduleRedraw();
+        })
+        .catch((err: unknown) => {
+          console.error(`[${type}] could not apply the draft message:`, err);
+        });
       return;
     }
     if (type === "drawing_mode_change") {
