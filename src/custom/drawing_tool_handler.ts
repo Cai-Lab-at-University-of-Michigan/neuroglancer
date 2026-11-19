@@ -1491,7 +1491,9 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
 
   // -- Segment hover tracking (neuroglancer → parent) -----------------------
 
-  let lastHoveredSegId: string | null = null;
+  // The last id sent, per layer: two layers can hold the same id under the
+  // pointer, and the page counts a hover for the layer the message names.
+  const lastHoveredSegId = new WeakMap<object, string | null>();
   const sendSegmentHoverState = () => {
     for (const managedLayer of viewer?.layerManager?.managedLayers ?? []) {
       const layer = (managedLayer as any)?.layer;
@@ -1501,11 +1503,15 @@ export function setupDrawingToolMessageHandler(drawingTool: DrawingTool) {
         selectionState.changed.add(() => {
           const raw = selectionState.value;
           const segId = raw !== undefined ? raw.toString() : null;
-          if (segId !== lastHoveredSegId) {
-            lastHoveredSegId = segId;
+          if (segId !== (lastHoveredSegId.get(selectionState) ?? null)) {
+            lastHoveredSegId.set(selectionState, segId);
+            // Which layer the id is on: its name, as for the colour seed, and
+            // its source, which a rename in the scene does not change.
             window.parent.postMessage({
               type: "segment_hover_sync",
               segmentId: segId !== null ? Number(segId) : null,
+              layerName: managedLayer.name,
+              layerSource: layer.dataSources?.[0]?.spec?.url,
             }, "*");
           }
         });
