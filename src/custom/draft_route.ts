@@ -504,7 +504,7 @@ interface DraftSourceLike {
 
 interface DraftQueueLike {
   sources: Iterable<unknown>;
-  invalidateCachedChunks(
+  refreshCachedChunks(
     source: any,
     keys: Iterable<string>,
     signal: AbortSignal,
@@ -563,7 +563,7 @@ export async function applyDraftMessage(
       }
     }
     if (keys.length > 0) {
-      reads.push(queue.invalidateCachedChunks(source, keys, signal));
+      reads.push(queue.refreshCachedChunks(source, keys, signal));
     }
   }
   for (const outcome of await Promise.all(reads)) {

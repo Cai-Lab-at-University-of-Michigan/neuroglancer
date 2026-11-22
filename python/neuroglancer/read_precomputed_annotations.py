@@ -92,13 +92,13 @@ class AnnotationMap(typing.Generic[K, V]):
         """Checks if a given key is present."""
         if self._kvstore is None:
             raise KeyError("required index kind not available")
-        return self._key_encoder(key) in self._kvstore
+        return self._key_encoder(key) in self._kvstore  # type: ignore[operator]
 
-    def get(self, key: K, batch: ts.Batch | None = None) -> ts.Future:
+    def get(self, key: K, batch: ts.Batch | None = None) -> ts.Future[V | None]:
         """Reads a given key, returning a Future."""
         if self._kvstore is None:
             raise KeyError("required index kind not available")
-        promise, future = ts.Promise.new()
+        promise, future = ts.Promise[V | None].new()
 
         def done_callback(future):
             try:
@@ -177,7 +177,7 @@ def _point_check_bounds(annotation, lower_bound, upper_bound):
 
 
 def _bbox_check_bounds(min_pt, max_pt, lower_bound, upper_bound):
-    return np.all(min_pt <= upper_bound) and np.all(max_pt <= lower_bound)
+    return np.all(min_pt <= upper_bound) and np.all(max_pt >= lower_bound)
 
 
 def _line_check_bounds(annotation, lower_bound, upper_bound):
@@ -199,7 +199,7 @@ def _axis_aligned_bounding_box_check_bounds(annotation, lower_bound, upper_bound
 
 
 def _ellipsoid_check_bounds(annotation, lower_bound, upper_bound):
-    center = annotation.point_a
+    center = annotation.center
     radii = annotation.radii
     return _bbox_check_bounds(center - radii, center + radii, lower_bound, upper_bound)
 
@@ -218,6 +218,57 @@ _ANNOTATION_TYPE_CHECK_BOUNDS = {
     "ellipsoid": _ellipsoid_check_bounds,
     "polyline": _polyline_check_bounds,
 }
+
+
+def _get_possibly_sharded_kvstore(
+    context: ts.Context, base_spec: ts.KvStore.Spec, metadata: dict[str, typing.Any]
+) -> ts.KvStore:
+    if "sharding" in metadata:
+        return ts.KvStore.open(
+            {
+                "driver": "neuroglancer_uint64_sharded",
+                "base": base_spec,
+                "metadata": metadata["sharding"],
+            },
+            context=context,
+        ).result()
+    return ts.KvStore.open(base_spec, context=context).result()
+
+
+def _get_uint64_map_args(
+    context: ts.Context,
+    base_spec: ts.KvStore.Spec,
+    metadata: typing.Any,
+    value_decoder: typing.Callable[[K, bytes], V],
+    staleness_bound: float,
+):
+    return dict(
+        kvstore=_get_possibly_sharded_kvstore(
+            context=context, base_spec=base_spec, metadata=metadata
+        ),
+        metadata=metadata,
+        key_encoder=_get_uint64_key_encoder(metadata),
+        value_decoder=value_decoder,
+        staleness_bound=staleness_bound,
+    )
+
+
+def _get_uint64_map(
+    context: ts.Context,
+    base_spec: ts.KvStore.Spec,
+    metadata: typing.Any,
+    value_decoder: typing.Callable[[K, bytes], V],
+    staleness_bound: float,
+) -> AnnotationMap[K, V]:
+    return AnnotationMap(
+        **_get_uint64_map_args(
+            context=context,
+            base_spec=base_spec,
+            metadata=metadata,
+            value_decoder=value_decoder,
+            staleness_bound=staleness_bound,
+        )
+    )
 
 
 class AnnotationReader:
@@ -346,9 +397,20 @@ class AnnotationReader:
             viewer_state.AnnotationPropertySpec(prop)
             for prop in self.metadata.get("properties", [])
         ]
-        self._property_dtype = write_annotations._get_dtype_for_properties(
-            self.properties
+        # Properties are encoded in order of decreasing alignment, which may
+        # differ from the order in which they are listed in the metadata.
+        alignments = [
+            write_annotations._PROPERTY_DTYPES[p.type][1] for p in self.properties
+        ]
+        encoded_order = sorted(
+            range(len(self.properties)), key=lambda i: -alignments[i]
         )
+        self._property_dtype = write_annotations._get_dtype_for_properties(
+            [self.properties[i] for i in encoded_order]
+        )
+        self._property_field_names = [""] * len(self.properties)
+        for encoded_index, i in enumerate(encoded_order):
+            self._property_field_names[i] = f"property{encoded_index}"
         self._dtype = (
             write_annotations._get_dtype_for_geometry(
                 self.annotation_type, self.coordinate_space.rank
@@ -379,7 +441,7 @@ class AnnotationReader:
         dtype = self._get_dtype(encoded)
         decoded = np.frombuffer(encoded, dtype=dtype, count=1)[0]
         geom = decoded["geometry"]
-        props = [decoded[f"property{i}"] for i in range(len(self.properties))]
+        props = [decoded[name] for name in self._property_field_names]
         offset = decoded.nbytes
         segments = []
         for i in range(len(self.relationships)):
@@ -422,43 +484,45 @@ class AnnotationReader:
             )
         constructor = _ANNOTATION_TYPE_CONSTRUCTORS[self.annotation_type]
         rank = self.coordinate_space.rank
-        num_properties = len(self.properties)
+        property_field_names = self._property_field_names
         return [
             constructor(
                 decoded[annotation_i]["geometry"],
                 rank,
-                [decoded[annotation_i][f"property{i}"] for i in range(num_properties)],
+                [decoded[annotation_i][name] for name in property_field_names],
                 None,
                 str(ids[annotation_i]),
             )
             for annotation_i in range(count)
         ]
 
-    def _get_child_kvstore(self, metadata: typing.Any) -> ts.KvStore | None:
+    def _get_child_kvstore_spec(self, metadata: typing.Any) -> ts.KvStore.Spec | None:
         if metadata is None:
             return None
         base_spec = self.base_spec.copy()
         base_spec.path += metadata["key"] + "/"
-        if "sharding" in metadata:
-            return ts.KvStore.open(
-                {
-                    "driver": "neuroglancer_uint64_sharded",
-                    "base": base_spec,
-                    "metadata": metadata["sharding"],
-                },
-                context=self._context,
-            ).result()
-        return ts.KvStore.open(base_spec, context=self._context).result()
+        return base_spec
+
+    def _get_child_kvstore(self, metadata: typing.Any) -> ts.KvStore | None:
+        child_spec = self._get_child_kvstore_spec(metadata)
+        if child_spec is None:
+            return None
+        return _get_possibly_sharded_kvstore(
+            context=self._context, base_spec=child_spec, metadata=metadata
+        )
 
     def _get_child_uint64_map(
         self, metadata: typing.Any, value_decoder: typing.Callable[[K, bytes], V]
     ):
-        return AnnotationMap(
-            kvstore=self._get_child_kvstore(metadata),
+        child_spec = self._get_child_kvstore_spec(metadata)
+        if child_spec is None:
+            return None
+        return _get_uint64_map(
+            context=self._context,
+            base_spec=child_spec,
             metadata=metadata,
-            key_encoder=_get_uint64_key_encoder(metadata),
-            value_decoder=value_decoder,
             staleness_bound=self.staleness_bound,
+            value_decoder=value_decoder,
         )
 
     def _get_child_spatial_map(self, metadata):
@@ -475,7 +539,7 @@ class AnnotationReader:
         *,
         lower_bound: typing.Sequence[float] | None = None,
         upper_bound: typing.Sequence[float] | None = None,
-        min_spatial_index_level=0,
+        max_spatial_index_level: int | None = None,
         limit: int | None = None,
         max_parallelism: int = 128,
     ) -> typing.Iterator[viewer_state.Annotation]:
@@ -486,9 +550,9 @@ class AnnotationReader:
               If not specified, defaults to `.lower_bound`.
           upper_bound: Upper bound within `.coordinate_space`.
               If not specified, defaults to `.upper_bound`.
-          min_spatial_index_level: Minimum spatial index level to use.
-          limit: Maximum number of iterations to return.
-
+          max_spatial_index_level: Maximum (finest) spatial index level to use.
+          limit: Maximum number of annotations to return.
+          max_parallelism: Maximum number of concurrent requests.
         Group:
           I/O
         """
@@ -547,7 +611,14 @@ class AnnotationReader:
                 (spatial_index.get(coords), req_lower_bound, req_upper_bound)
             )
 
-        for level in range(len(self.spatial) - 1, min_spatial_index_level - 1, -1):
+        if max_spatial_index_level is None:
+            max_spatial_index_level = len(self.spatial) - 1
+        else:
+            max_spatial_index_level = min(
+                max_spatial_index_level, len(self.spatial) - 1
+            )
+
+        for level in range(max_spatial_index_level + 1):
             if limit is not None and count >= limit:
                 return
             spatial_index = self.spatial[level]

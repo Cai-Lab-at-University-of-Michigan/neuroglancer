@@ -109,6 +109,7 @@ import {
 import type { Trackable } from "#src/util/trackable.js";
 import { kEmptyFloat32Vec } from "#src/util/vector.js";
 import type { WatchableVisibilityPriority } from "#src/visibility_priority/frontend.js";
+import { LayerAccordionStates } from "#src/widget/accordion.js";
 import type { DependentViewContext } from "#src/widget/dependent_view_widget.js";
 import type { Tab } from "#src/widget/tab_view.js";
 import { TabSpecification } from "#src/widget/tab_view.js";
@@ -122,6 +123,7 @@ const LOCAL_COORDINATE_SPACE_JSON_KEY = "localDimensions";
 const SOURCE_JSON_KEY = "source";
 const TRANSFORM_JSON_KEY = "transform";
 const PICK_JSON_KEY = "pick";
+const ACCORDIONS_JSON_KEY = "accordions";
 
 export interface UserLayerSelectionState {
   generation: number;
@@ -364,9 +366,13 @@ export class UserLayer extends RefCounted {
   get isReady() {
     return this.loadingCounter === 0;
   }
+  isReadyWatchable: WatchableValueInterface<boolean> = new WatchableValue(
+    false,
+  );
 
   tabs = this.registerDisposer(new TabSpecification());
   panels = new UserLayerSidePanelsState(this);
+  accordions = this.registerDisposer(new LayerAccordionStates());
   tool = this.registerDisposer(new SelectedLegacyTool(this));
   toolBinder: LayerToolBinder<this>;
 
@@ -379,6 +385,11 @@ export class UserLayer extends RefCounted {
 
   constructor(public managedLayer: Borrowed<ManagedUserLayer>) {
     super();
+    this.registerDisposer(
+      this.readyStateChanged.add(() => {
+        this.isReadyWatchable.value = this.isReady;
+      }),
+    );
     this.toolBinder = this.registerDisposer(
       new LayerToolBinder(this, this.manager.root.toolBinder),
     );
@@ -386,6 +397,7 @@ export class UserLayer extends RefCounted {
       isLocalOrChannelDimension;
     this.tabs.changed.add(this.specificationChanged.dispatch);
     this.panels.specificationChanged.add(this.specificationChanged.dispatch);
+    this.accordions.changed.add(this.specificationChanged.dispatch);
     this.tool.changed.add(this.specificationChanged.dispatch);
     this.toolBinder.changed.add(this.specificationChanged.dispatch);
     this.localPosition.changed.add(this.specificationChanged.dispatch);
@@ -542,6 +554,7 @@ export class UserLayer extends RefCounted {
     this.localPosition.restoreState(specification[LOCAL_POSITION_JSON_KEY]);
     this.localVelocity.restoreState(specification[LOCAL_VELOCITY_JSON_KEY]);
     this.toolBinder.restoreState(specification[TOOL_BINDINGS_JSON_KEY]);
+    this.accordions.restoreState(specification[ACCORDIONS_JSON_KEY]);
     if ((this.constructor as typeof UserLayer).supportsPickOption) {
       this.pick.restoreState(specification[PICK_JSON_KEY]);
     }
@@ -618,6 +631,7 @@ export class UserLayer extends RefCounted {
       [LOCAL_POSITION_JSON_KEY]: this.localPosition.toJSON(),
       [LOCAL_VELOCITY_JSON_KEY]: this.localVelocity.toJSON(),
       [PICK_JSON_KEY]: this.pick.toJSON(),
+      [ACCORDIONS_JSON_KEY]: this.accordions.toJSON(),
       ...this.panels.toJSON(),
     };
   }
@@ -1383,7 +1397,7 @@ export class TrackableDataSelectionState
   captureSingleLayerState<T extends UserLayer>(
     userLayer: Borrowed<T>,
     capture: (state: T["selectionState"]) => boolean,
-    pin: boolean | "toggle" = true,
+    pin: boolean | "toggle" | "force-unpin" = true,
   ) {
     if (pin === false && (!this.location.visible || this.pin.value)) return;
     const state = {} as UserLayerSelectionState;
@@ -1394,6 +1408,8 @@ export class TrackableDataSelectionState
         this.pin.value = true;
       } else if (pin === "toggle") {
         this.pin.value = !this.pin.value;
+      } else if (pin === "force-unpin") {
+        this.pin.value = false;
       }
       this.value = {
         layers: [{ layer: userLayer, state }],
@@ -1443,10 +1459,11 @@ export class TrackableDataSelectionState
   select() {
     const { pin } = this;
     this.location.visible = true;
-    pin.value = !pin.value;
-    if (pin.value) {
-      this.capture();
-    }
+    pin.value = true;
+    this.capture();
+  }
+  unpin() {
+    this.pin.value = false;
   }
   capture(canRetain = false) {
     const newValue = capturePersistentViewerSelectionState(
