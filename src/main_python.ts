@@ -35,7 +35,6 @@ import { TrackableBasedStatusMessages } from "#src/python_integration/remote_sta
 import { ScreenshotHandler } from "#src/python_integration/screenshots.js";
 import { VolumeRequestHandler } from "#src/python_integration/volume.js";
 import { TrackableValue } from "#src/trackable_value.js";
-import { bindCommandPalette } from "#src/ui/command_palette.js";
 import {
   bindDefaultCopyHandler,
   bindDefaultPasteHandler,
@@ -242,7 +241,9 @@ volumeHandler.sendVolumeChunkResponseRequested.add((requestId, info) =>
 bindDefaultCopyHandler(viewer);
 bindDefaultPasteHandler(viewer);
 registerDefaultCommands(viewer.commandRegistry);
-bindCommandPalette(viewer);
+// No command palette here: the page that embeds this viewer has its own panel
+// and shortcuts, and the palette (Ctrl+P, Cmd+P on a Mac) would open over the
+// viewer with commands that bypass that panel.
 bindStateEditor(viewer);
 bindScreenshotDialog(viewer);
 viewer.registerDisposer(bindTitle(viewer.title));
