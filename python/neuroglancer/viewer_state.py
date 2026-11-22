@@ -13,6 +13,8 @@
 # limitations under the License.
 """Wrappers for representing the Neuroglancer viewer state."""
 
+from __future__ import annotations
+
 import collections
 import collections.abc
 import copy
@@ -72,7 +74,9 @@ def unit_quaternion():
     return np.array([0, 0, 0, 1], np.float32)
 
 
-def quaternion_slerp(a, b, t):
+def quaternion_slerp(
+    a: np.ndarray | None, b: np.ndarray | None, t: float
+) -> np.ndarray:
     """Spherical linear interpolation for unit quaternions.
 
     This is based on the implementation in the gl-matrix package:
@@ -104,7 +108,7 @@ def quaternion_slerp(a, b, t):
     return scale0 * a + scale1 * b
 
 
-def interpolate_zoom(a, b, t):
+def interpolate_zoom(a: float | None, b: float | None, t: float) -> float | None:
     if a is None or b is None:
         return a
     scale_change = math.log(b / a)
@@ -357,6 +361,72 @@ class DimensionTool(LayerTool):
     dimension = wrapped_property("dimension", str)
 
 
+@export_tool
+class PaintBrushTool(LayerTool):
+    __slots__ = ()
+    TOOL_TYPE = "paintBrush"
+
+
+@export_tool
+class FloodFillTool(LayerTool):
+    __slots__ = ()
+    TOOL_TYPE = "floodFill"
+
+
+@export_tool
+class PickPaintValueTool(LayerTool):
+    __slots__ = ()
+    TOOL_TYPE = "pickPaintValue"
+
+
+@export_tool
+class BrushRadiusTool(LayerTool):
+    __slots__ = ()
+    TOOL_TYPE = "brushRadius"
+
+
+@export_tool
+class BrushShapeTool(LayerTool):
+    __slots__ = ()
+    TOOL_TYPE = "brushShape"
+
+
+@export_tool
+class FloodFillMaxVoxelsTool(LayerTool):
+    __slots__ = ()
+    TOOL_TYPE = "floodFillMaxVoxels"
+
+
+@export_tool
+class ErasePaintValueOnlyTool(LayerTool):
+    __slots__ = ()
+    TOOL_TYPE = "erasePaintValueOnly"
+
+
+@export_tool
+class PaintValueTool(LayerTool):
+    __slots__ = ()
+    TOOL_TYPE = "paintValue"
+
+
+@export_tool
+class RandomizePaintValueTool(LayerTool):
+    __slots__ = ()
+    TOOL_TYPE = "randomizePaintValue"
+
+
+@export_tool
+class UndoPaintTool(LayerTool):
+    __slots__ = ()
+    TOOL_TYPE = "undoPaint"
+
+
+@export_tool
+class RedoPaintTool(LayerTool):
+    __slots__ = ()
+    TOOL_TYPE = "redoPaint"
+
+
 @export
 class SidePanelLocation(JsonObjectWrapper):
     __slots__ = ()
@@ -410,6 +480,84 @@ class DimensionPlaybackVelocity(JsonObjectWrapper):
     velocity = wrapped_property("velocity", optional(float, 10))
     at_boundary = atBoundary = wrapped_property("atBoundary", optional(str, "reverse"))
     paused = wrapped_property("paused", optional(bool, True))
+
+
+@export
+class AnnotationsAccordion(JsonObjectWrapper):
+    """Accordion state for layer annotation controls."""
+
+    __slots__ = ()
+
+    spacing_expanded = spacingExpanded = wrapped_property(
+        "spacingExpanded", optional(bool)
+    )
+    related_segments_expanded = relatedSegmentsExpanded = wrapped_property(
+        "relatedSegmentsExpanded", optional(bool)
+    )
+    annotations_expanded = annotationsExpanded = wrapped_property(
+        "annotationsExpanded", optional(bool)
+    )
+
+
+@export
+class ImageRenderingAccordion(JsonObjectWrapper):
+    """Accordion state for image layer rendering controls."""
+
+    __slots__ = ()
+
+    slice_expanded = sliceExpanded = wrapped_property("sliceExpanded", optional(bool))
+    volume_rendering_expanded = volumeRenderingExpanded = wrapped_property(
+        "volumeRenderingExpanded", optional(bool)
+    )
+    shader_expanded = shaderExpanded = wrapped_property(
+        "shaderExpanded", optional(bool)
+    )
+
+
+@export
+class SegmentationRenderingAccordion(JsonObjectWrapper):
+    """Accordion state for segmentation layer rendering controls."""
+
+    __slots__ = ()
+
+    visibility_expanded = visibilityExpanded = wrapped_property(
+        "visibilityExpanded", optional(bool)
+    )
+    appearance_expanded = appearanceExpanded = wrapped_property(
+        "appearanceExpanded", optional(bool)
+    )
+    slice_rendering_expanded = sliceRenderingExpanded = wrapped_property(
+        "sliceRenderingExpanded", optional(bool)
+    )
+    mesh_rendering_expanded = meshRenderingExpanded = wrapped_property(
+        "meshRenderingExpanded", optional(bool)
+    )
+    skeletons_expanded = skeletonsExpanded = wrapped_property(
+        "skeletonsExpanded", optional(bool)
+    )
+
+
+@export
+class LayerAccordions(JsonObjectWrapper):
+    """Keyed by layer tab id."""
+
+    __slots__ = ()
+
+    annotations = wrapped_property("annotations", AnnotationsAccordion)
+
+
+@export
+class ImageLayerAccordions(LayerAccordions):
+    __slots__ = ()
+
+    rendering = wrapped_property("rendering", ImageRenderingAccordion)
+
+
+@export
+class SegmentationLayerAccordions(LayerAccordions):
+    __slots__ = ()
+
+    rendering = wrapped_property("rendering", SegmentationRenderingAccordion)
 
 
 @export
@@ -486,6 +634,9 @@ class LayerDataSubsource(JsonObjectWrapper):
         super().__init__(json_data, *args, **kwargs)
 
     enabled = wrapped_property("enabled", optional(bool))
+    writing_enabled = writingEnabled = wrapped_property(
+        "writingEnabled", optional(bool)
+    )
 
 
 @export
@@ -534,6 +685,7 @@ class LayerDataSources(_LayerDataSourcesBase):
 
 class _AnnotationLayerOptions:
     __slots__ = ()
+    accordions = wrapped_property("accordions", LayerAccordions)
     annotation_color = annotationColor = wrapped_property(
         "annotationColor", optional(str)
     )
@@ -589,6 +741,35 @@ _shader_control_parameters.supports_readonly = True  # type: ignore[attr-defined
 ShaderControls = typed_map(str, _shader_control_parameters)
 
 
+class _PaintValue(int):
+    supports_validation = True
+    _neuroglancer_annotation = int
+
+    # Serialized as a base-10 string, like the frontend, to keep 64-bit precision.
+    def to_json(self):
+        return str(self)
+
+
+@export
+class VoxelEditingOptions(JsonObjectWrapper):
+    __slots__ = ()
+
+    paint_value = paintValue = wrapped_property(
+        "paintValue", optional(_PaintValue, _PaintValue(1))
+    )
+    brush_radius = brushRadius = wrapped_property("brushRadius", optional(int, 3))
+    brush_shape = brushShape = wrapped_property("brushShape", optional(str, "disk"))
+    flood_fill_max_voxels = floodFillMaxVoxels = wrapped_property(
+        "floodFillMaxVoxels", optional(int, 10000)
+    )
+    flood_fill_morphological = floodFillMorphological = wrapped_property(
+        "floodFillMorphological", optional(bool, True)
+    )
+    erase_paint_value_only = erasePaintValueOnly = wrapped_property(
+        "erasePaintValueOnly", optional(bool, False)
+    )
+
+
 @export
 class ImageLayer(Layer, _AnnotationLayerOptions):
     __slots__ = ()
@@ -600,6 +781,9 @@ class ImageLayer(Layer, _AnnotationLayerOptions):
     shader = wrapped_property("shader", str)
     shader_controls = shaderControls = wrapped_property(
         "shaderControls", ShaderControls
+    )
+    hide_inactive_shader_controls = hideInactiveShaderControls = wrapped_property(
+        "hideInactiveShaderControls", optional(bool, False)
     )
     opacity = wrapped_property("opacity", optional(float, 0.5))
     blend = wrapped_property("blend", optional(str))
@@ -615,6 +799,8 @@ class ImageLayer(Layer, _AnnotationLayerOptions):
     cross_section_render_scale = crossSectionRenderScale = wrapped_property(
         "crossSectionRenderScale", optional(float, 1)
     )
+    accordions = wrapped_property("accordions", ImageLayerAccordions)
+    voxel_editing = voxelEditing = wrapped_property("voxelEditing", VoxelEditingOptions)
 
     @staticmethod
     def interpolate(a, b, t):
@@ -646,6 +832,9 @@ class SkeletonRenderingOptions(JsonObjectWrapper):
     shader = wrapped_property("shader", optional(str))
     shader_controls = shaderControls = wrapped_property(
         "shaderControls", ShaderControls
+    )
+    hide_inactive_shader_controls = hideInactiveShaderControls = wrapped_property(
+        "hideInactiveShaderControls", optional(bool, False)
     )
     mode2d = wrapped_property("mode2d", optional(str))
     line_width2d = lineWidth2d = wrapped_property("lineWidth2d", optional(float, 2))
@@ -826,11 +1015,9 @@ class StarredSegments(collections.abc.MutableMapping[int, bool]):
 
     def update(  # type: ignore[override]
         self,
-        other: typing.Union[
-            "StarredSegments",
-            collections.abc.MutableMapping[int, bool],
-            typing.Iterable[int | str | tuple[int, bool]],
-        ],
+        other: StarredSegments
+        | collections.abc.MutableMapping[int, bool]
+        | typing.Iterable[int | str | tuple[int, bool]],
     ):
         """Merges in additional starred segments."""
         if self._readonly:
@@ -848,7 +1035,7 @@ class StarredSegments(collections.abc.MutableMapping[int, bool]):
         return iter(self._data)
 
     @property
-    def visible(self) -> "VisibleSegments":
+    def visible(self) -> VisibleSegments:
         return VisibleSegments(self)
 
     @visible.setter
@@ -896,7 +1083,7 @@ class VisibleSegments(collections.abc.MutableSet[int]):
         """Iterates over the visible segments."""
         return iter(self._visible)
 
-    def copy(self) -> "VisibleSegments":
+    def copy(self) -> VisibleSegments:
         """Returns a copy of the visible segment list."""
         new_starred_segments = StarredSegments()
         new_visible = self._visible.copy()
@@ -952,6 +1139,7 @@ class SegmentationLayer(Layer, _AnnotationLayerOptions):
     skeleton_rendering = skeletonRendering = wrapped_property(
         "skeletonRendering", SkeletonRenderingOptions
     )
+    accordions = wrapped_property("accordions", SegmentationLayerAccordions)
 
     @property
     def skeleton_shader(self):
@@ -980,6 +1168,9 @@ class SegmentationLayer(Layer, _AnnotationLayerOptions):
     segment_default_color = segmentDefaultColor = wrapped_property(
         "segmentDefaultColor", optional(str)
     )
+    segment_color_shader = segmentColorShader = wrapped_property(
+        "segmentColorShader", optional(str)
+    )
 
     @property
     def segment_html_color_dict(self):
@@ -998,6 +1189,7 @@ class SegmentationLayer(Layer, _AnnotationLayerOptions):
     linked_segmentation_group = linkedSegmentationGroup = wrapped_property(
         "linkedSegmentationGroup", optional(str)
     )
+    voxel_editing = voxelEditing = wrapped_property("voxelEditing", VoxelEditingOptions)
     linked_segmentation_color_group = linkedSegmentationColorGroup = wrapped_property(
         "linkedSegmentationColorGroup", optional(_linked_segmentation_color_group_value)
     )
@@ -1024,6 +1216,9 @@ class SingleMeshLayer(Layer):
     shader = wrapped_property("shader", str)
     vertex_attribute_names = vertexAttributeNames = wrapped_property(
         "vertexAttributeNames", optional(typed_list(optional(str)))
+    )
+    hide_inactive_shader_controls = hideInactiveShaderControls = wrapped_property(
+        "hideInactiveShaderControls", optional(bool, False)
     )
 
 
@@ -1181,6 +1376,9 @@ class AnnotationLayer(Layer, _AnnotationLayerOptions):
     shader_controls = shaderControls = wrapped_property(
         "shaderControls", ShaderControls
     )
+    hide_inactive_shader_controls = hideInactiveShaderControls = wrapped_property(
+        "hideInactiveShaderControls", optional(bool, False)
+    )
 
     @staticmethod
     def interpolate(a, b, t):
@@ -1308,11 +1506,11 @@ class Layers:
     __slots__ = ("_layers", "_readonly")
     supports_readonly = True
 
-    def __init__(self, json_data, _readonly=False):
+    def __init__(self, json_data: typing.Any, _readonly: bool = False) -> None:
         if json_data is None:
             json_data = {}
-        self._layers = []
-        self._readonly = _readonly
+        self._layers: list[ManagedLayer] = []
+        self._readonly: bool = _readonly
         if isinstance(json_data, collections.abc.Mapping):
             for k, v in json_data.items():
                 self._layers.append(ManagedLayer(k, v, _readonly=_readonly))
@@ -1330,22 +1528,47 @@ class Layers:
                 else:
                     raise TypeError
 
-    def index(self, k):
+    def index(self, k: str) -> int:
         for i, u in enumerate(self._layers):
             if u.name == k:
                 return i
         return -1
 
-    def __contains__(self, k):
+    def __contains__(self, k: str) -> int:
         return self.index(k) != -1
 
-    def __getitem__(self, k):
-        """Indexes into the list of layers by index, slice, or layer name."""
-        if isinstance(k, str):
-            return self._layers[self.index(k)]
-        return self._layers[k]
+    @typing.overload
+    def __getitem__(self, k: str | int) -> ManagedLayer: ...
 
-    def __setitem__(self, k, v):
+    @typing.overload
+    def __getitem__(self, k: slice) -> Layers: ...
+
+    def __getitem__(self, k: str | int | slice) -> ManagedLayer | Layers:
+        """Indexes into the list of layers by index, slice, or layer name."""
+        match k:
+            case str():
+                return self._layers[self.index(k)]
+            case slice():
+                return Layers(self._layers[k])
+            case _:
+                return self._layers[k]
+
+    @typing.overload
+    def __setitem__(self, k: str, v: Layer | ManagedLayer) -> None: ...
+
+    @typing.overload
+    def __setitem__(self, k: int, v: ManagedLayer) -> None: ...
+
+    @typing.overload
+    def __setitem__(
+        self, k: slice, v: collections.abc.Iterable[ManagedLayer]
+    ) -> None: ...
+
+    def __setitem__(
+        self,
+        k: str | int | slice,
+        v: Layer | ManagedLayer | collections.abc.Iterable[ManagedLayer],
+    ) -> None:
         if self._readonly:
             raise AttributeError
         if isinstance(k, str):
@@ -1361,7 +1584,7 @@ class Layers:
         else:
             if isinstance(k, slice):
                 values = []
-                for x in v:
+                for x in typing.cast(collections.abc.Iterable[ManagedLayer], v):
                     if not isinstance(v, ManagedLayer):
                         raise TypeError
                     values.append(x)
@@ -1371,11 +1594,11 @@ class Layers:
                     raise TypeError
                 self._layers[k] = v
 
-    def clear(self):
+    def clear(self) -> None:
         """Clears the list of layers."""
         del self[:]
 
-    def __delitem__(self, k):
+    def __delitem__(self, k: str | int | slice) -> None:
         """Deletes a layer by index, slice, or name."""
         if self._readonly:
             raise AttributeError
@@ -1397,11 +1620,11 @@ class Layers:
         for element in elements:
             self.append(element)
 
-    def __len__(self):
+    def __len__(self) -> int:
         """Returns the number of layers in the list."""
         return len(self._layers)
 
-    def __iter__(self):
+    def __iter__(self) -> collections.abc.Iterator[ManagedLayer]:
         return iter(self._layers)
 
     def to_json(self):
@@ -1410,11 +1633,11 @@ class Layers:
             r.append(x.to_json())
         return r
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return repr(self._layers)
 
     @staticmethod
-    def interpolate(a, b, t):
+    def interpolate(a: Layers, b: Layers, t: float) -> Layers:
         c = copy.deepcopy(a)
         for layer in c:
             index = b.index(layer.name)
@@ -1452,7 +1675,11 @@ class LinkedType(typing.Generic[T], JsonObjectWrapper):
 
     __slots__ = ()
     link = wrapped_property("link", optional(navigation_link_type, "linked"))
-    value: T
+    if _BUILDING_DOCS:
+        # For some reason `T` doesn't get resolved properly by sphinx-immaterial.
+        value: typing.Any
+    else:
+        value: T  # type: ignore[no-redef]
 
     _interpolate_function: typing.ClassVar[
         typing.Callable[[typing.Any, typing.Any, float], typing.Any]
@@ -1777,7 +2004,71 @@ add_data_panel_layout_types()
 
 
 @export
+class SegmentIdMapEntry(typing.NamedTuple):
+    key: int
+    value: int | None = None
+    label: str | None = None
+
+
+@export
+def layer_selected_value(x) -> None | int | numbers.Number | SegmentIdMapEntry:
+    """Normalizes the selected value for a layer."""
+    if isinstance(x, numbers.Number):
+        return x
+    if isinstance(x, str):
+        return int(x)
+    if isinstance(x, dict):
+        value = x.get("value")
+        if value is not None:
+            value = int(value)
+        return SegmentIdMapEntry(int(x["key"]), value, x.get("label"))
+    return None
+
+
+_set_type_annotation(layer_selected_value, None | numbers.Number | SegmentIdMapEntry)
+
+
+@export
+class LayerSelectionState(JsonObjectWrapper):
+    """Represents the selection state for a single layer."""
+
+    __slots__ = ()
+    supports_validation = True
+    local_position = wrapped_property(
+        "localPosition", optional(array_wrapper(np.float32))
+    )
+    value = wrapped_property("value", optional(layer_selected_value))
+    annotation_id = annotationId = wrapped_property("annotationId", optional(str))
+    annotation_part = annotationPart = wrapped_property("annotationPart", optional(int))
+    annotation_subsource = annotationSubsource = wrapped_property(
+        "annotationSubsource", optional(str)
+    )
+
+
+if typing.TYPE_CHECKING or _BUILDING_DOCS:
+    _LayerSelectedValuesBase = Map[str, LayerSelectionState]
+else:
+    _LayerSelectedValuesBase = typed_map(str, LayerSelectionState)
+
+
+@export
+class LayerSelectedValues(_LayerSelectedValuesBase):
+    """Specifies the data values associated with the current mouse position."""
+
+
+@export
+class DataSelectionState(SidePanelLocation):
+    position = wrapped_property("position", optional(array_wrapper(np.float32)))
+
+    layers = wrapped_property("layers", LayerSelectedValues)
+
+
+@export
 class ViewerState(JsonObjectWrapper):
+    """Complete Neuroglancer viewer state.
+
+    This includes all state that is normally encoded into a Neuroglancer URL."""
+
     __slots__ = ()
     title = wrapped_property("title", optional(str))
     dimensions = wrapped_property("dimensions", CoordinateSpace)
@@ -1868,6 +2159,7 @@ class ViewerState(JsonObjectWrapper):
     tool_palettes = toolPalettes = wrapped_property(
         "toolPalettes", typed_map(key_type=str, value_type=ToolPalette)
     )
+    selection = wrapped_property("selection", DataSelectionState)
 
     @staticmethod
     def interpolate(a, b, t):

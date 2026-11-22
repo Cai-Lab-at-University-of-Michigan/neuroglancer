@@ -16,12 +16,13 @@
 
 import { throttle } from "lodash-es";
 import type {
-  ChunksInvalidateResult,
+  ChunksRefreshResult,
   ChunkSourceParametersConstructor,
   ChunkSourceRefreshResult,
   LayerChunkProgressInfo,
 } from "#src/chunk_manager/base.js";
 import {
+  CHUNK_SOURCE_INVALIDATE_CHUNKS_RPC_ID,
   CHUNK_LAYER_STATISTICS_RPC_ID,
   CHUNK_MANAGER_RPC_ID,
   CHUNK_QUEUE_MANAGER_RPC_ID,
@@ -176,8 +177,15 @@ export class Chunk implements Disposable {
    */
   downloadAbortController: AbortController | undefined = undefined;
 
+  /**
+   * Set when the cached data was invalidated while the frontend held a copy,
+   * which it keeps on display until refetched data replaces it.
+   */
+  staleOnFrontend = false;
+
   initialize(key: string) {
     this.key = key;
+    this.staleOnFrontend = false;
     this.priority = Number.NEGATIVE_INFINITY;
     this.priorityTier = ChunkPriorityTier.RECENT;
     this.newPriority = Number.NEGATIVE_INFINITY;
@@ -785,7 +793,7 @@ export class ChunkQueueManager extends SharedObjectCounterpart {
   /** The newest refresh of each source; an older one steps aside for it. */
   private refreshGenerations = new WeakMap<ChunkSourceBase, number>();
 
-  /** The newest `invalidateCachedChunks` call for each chunk it is still reading, by key. */
+  /** The newest `refreshCachedChunks` call for each chunk it is still reading, by key. */
   private chunkGenerations = new WeakMap<
     ChunkSourceBase,
     Map<string, number>
@@ -914,6 +922,14 @@ export class ChunkQueueManager extends SharedObjectCounterpart {
     ) {
       // Delete this chunk.
       const { source } = chunk;
+      if (chunk.staleOnFrontend) {
+        // Nothing will refetch it: drop the stale copy the frontend still holds.
+        this.rpc!.invoke("Chunk.update", {
+          id: chunk.key,
+          state: ChunkState.EXPIRED,
+          source: source!.rpcId,
+        });
+      }
       source!.removeChunk(chunk);
       this.adjustCapacitiesForChunk(chunk, false);
       return false;
@@ -1056,6 +1072,7 @@ export class ChunkQueueManager extends SharedObjectCounterpart {
   }
 
   moveChunkToFrontend(chunk: Chunk) {
+    chunk.staleOnFrontend = false;
     const rpc = this.rpc!;
     const msg: any = {};
     const transfers: any[] = [];
@@ -1171,9 +1188,15 @@ export class ChunkQueueManager extends SharedObjectCounterpart {
     }
   }
 
-  invalidateSourceCache(source: ChunkSource) {
-    for (const chunk of source.chunks.values()) {
+  invalidateCachedChunks(source: ChunkSource, keys: string[]) {
+    for (const key of keys) {
+      const chunk = source.chunks.get(key);
+      if (!chunk) continue;
       switch (chunk.state) {
+        case ChunkState.GPU_MEMORY:
+        case ChunkState.SYSTEM_MEMORY:
+          chunk.staleOnFrontend = true;
+          break;
         case ChunkState.DOWNLOADING:
           cancelChunkDownload(chunk);
           break;
@@ -1184,6 +1207,10 @@ export class ChunkQueueManager extends SharedObjectCounterpart {
       // Note: After calling this, chunk may no longer be valid.
       this.updateChunkState(chunk, ChunkState.QUEUED);
     }
+  }
+
+  invalidateSourceCache(source: ChunkSource) {
+    this.invalidateCachedChunks(source, [...source.chunks.keys()]);
     this.rpc!.invoke("Chunk.update", { source: source.rpcId });
     this.scheduleUpdate();
   }
@@ -1348,12 +1375,16 @@ export class ChunkQueueManager extends SharedObjectCounterpart {
    * Each chunk has its own generation: calls for different chunks do not
    * disturb each other, and of two calls for one chunk only the newer one's
    * read is put on screen, whichever answers first.
+   *
+   * Unlike `invalidateCachedChunks`, which marks the chunks stale and lets the
+   * normal queue read them again, this reads into spare chunks, reports what
+   * it did, and can be cancelled through `signal`.
    */
-  async invalidateCachedChunks(
+  async refreshCachedChunks(
     source: ChunkSourceBase,
     keys: Iterable<string>,
     signal: AbortSignal,
-  ): Promise<ChunksInvalidateResult> {
+  ): Promise<ChunksRefreshResult> {
     const named: Chunk[] = [];
     for (const key of keys) {
       const chunk = source.chunks.get(key);
@@ -1651,6 +1682,12 @@ export function withChunkManager<
 registerRPC(CHUNK_SOURCE_INVALIDATE_RPC_ID, function (x) {
   const source = <ChunkSource>this.get(x.id);
   source.chunkManager.queueManager.invalidateSourceCache(source);
+});
+
+registerRPC(CHUNK_SOURCE_INVALIDATE_CHUNKS_RPC_ID, function (x) {
+  const source = <ChunkSource>this.get(x.id);
+  source.chunkManager.queueManager.invalidateCachedChunks(source, x.keys);
+  source.chunkManager.queueManager.scheduleUpdate();
 });
 
 registerPromiseRPC(

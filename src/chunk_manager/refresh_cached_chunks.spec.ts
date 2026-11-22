@@ -15,7 +15,7 @@
  */
 
 /**
- * `ChunkQueueManager.invalidateCachedChunks`: some chunks of a source are read
+ * `ChunkQueueManager.refreshCachedChunks`: some chunks of a source are read
  * again, the rest of the source is left alone. A chunk a view shows stays on
  * screen until its new data replaces it; a chunk that was only read ahead is
  * dropped. Each chunk has its own generation, so that two calls for different
@@ -91,7 +91,7 @@ function makeQueue() {
     queue.sent.push(`${c.key} <- ${fresh.tag}`);
   });
   return queue as {
-    invalidateCachedChunks(
+    refreshCachedChunks(
       source: any,
       keys: Iterable<string>,
       signal: AbortSignal,
@@ -115,7 +115,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("ChunkQueueManager.invalidateCachedChunks", () => {
+describe("ChunkQueueManager.refreshCachedChunks", () => {
   it("reads the named chunks again and touches no other chunk of the source", async () => {
     const queue = makeQueue();
     const { source, release } = makeSource([
@@ -124,7 +124,7 @@ describe("ChunkQueueManager.invalidateCachedChunks", () => {
       chunk("c"),
     ]);
 
-    const done = queue.invalidateCachedChunks(source, ["a", "b"], signal());
+    const done = queue.refreshCachedChunks(source, ["a", "b"], signal());
     await release("a", "a2");
     await release("b", "b2");
 
@@ -144,7 +144,7 @@ describe("ChunkQueueManager.invalidateCachedChunks", () => {
     const a = chunk("a");
     const { source, release } = makeSource([a]);
 
-    const done = queue.invalidateCachedChunks(source, ["a"], signal());
+    const done = queue.refreshCachedChunks(source, ["a"], signal());
     await vi.advanceTimersByTimeAsync(0);
     expect(a.state).toBe(ChunkState.GPU_MEMORY);
     expect(queue.evicted).toEqual([]);
@@ -162,7 +162,7 @@ describe("ChunkQueueManager.invalidateCachedChunks", () => {
       chunk("ahead2", ChunkState.GPU_MEMORY, ChunkPriorityTier.PREFETCH),
     ]);
 
-    const done = queue.invalidateCachedChunks(
+    const done = queue.refreshCachedChunks(
       source,
       ["shown", "ahead", "ahead2"],
       signal(),
@@ -189,7 +189,7 @@ describe("ChunkQueueManager.invalidateCachedChunks", () => {
       chunk("queued", ChunkState.QUEUED),
     ]);
 
-    const result = await queue.invalidateCachedChunks(
+    const result = await queue.refreshCachedChunks(
       source,
       ["downloading", "memory", "recent", "queued", "not-in-the-cache"],
       signal(),
@@ -209,8 +209,8 @@ describe("ChunkQueueManager.invalidateCachedChunks", () => {
     const queue = makeQueue();
     const { source, release } = makeSource([chunk("left"), chunk("right")]);
 
-    const first = queue.invalidateCachedChunks(source, ["left"], signal());
-    const second = queue.invalidateCachedChunks(source, ["right"], signal());
+    const first = queue.refreshCachedChunks(source, ["left"], signal());
+    const second = queue.refreshCachedChunks(source, ["right"], signal());
     await release("right", "stroke-2");
     await release("left", "stroke-1");
 
@@ -224,8 +224,8 @@ describe("ChunkQueueManager.invalidateCachedChunks", () => {
     const queue = makeQueue();
     const { source, waiting } = makeSource([chunk("a")]);
 
-    const first = queue.invalidateCachedChunks(source, ["a"], signal());
-    const second = queue.invalidateCachedChunks(source, ["a"], signal());
+    const first = queue.refreshCachedChunks(source, ["a"], signal());
+    const second = queue.refreshCachedChunks(source, ["a"], signal());
     await vi.advanceTimersByTimeAsync(0);
     expect(waiting.length).toBe(2);
     // The second read (it has both strokes) answers first, the first one
@@ -247,7 +247,7 @@ describe("ChunkQueueManager.invalidateCachedChunks", () => {
     const a = chunk("a");
     const { source, release } = makeSource([a]);
 
-    const done = queue.invalidateCachedChunks(source, ["a"], signal());
+    const done = queue.refreshCachedChunks(source, ["a"], signal());
     await vi.advanceTimersByTimeAsync(0);
     // The cache moves the chunk off the GPU; the frontend keeps its bytes.
     a.state = ChunkState.SYSTEM_MEMORY;
@@ -265,7 +265,7 @@ describe("ChunkQueueManager.invalidateCachedChunks", () => {
       throw new Error("network");
     });
 
-    const done = queue.invalidateCachedChunks(source, ["a", "b"], signal());
+    const done = queue.refreshCachedChunks(source, ["a", "b"], signal());
     await release("b", "b2");
 
     expect(await done).toMatchObject({ refreshed: 1, failed: 1 });
@@ -282,9 +282,32 @@ describe("ChunkQueueManager.invalidateCachedChunks", () => {
       ]),
     };
 
-    const result = await queue.invalidateCachedChunks(source, ["a"], signal());
+    const result = await queue.refreshCachedChunks(source, ["a"], signal());
 
     expect(result).toEqual({ refreshed: 0, skipped: 0, failed: 0, dropped: 1 });
     expect(queue.evicted).toEqual(["a"]);
+  });
+});
+
+describe("ChunkQueueManager.invalidateCachedChunks, upstream's, next to it", () => {
+  it("invalidateSourceCache marks a chunk on screen stale and queues it at once, reading nothing into a spare chunk", () => {
+    const queue = makeQueue() as any;
+    queue.updateChunkState = vi.fn((c: FakeChunk, state: ChunkState) => {
+      c.state = state;
+    });
+    queue.rpc = { invoke: vi.fn() };
+    queue.scheduleUpdate = vi.fn();
+    const a: FakeChunk & { staleOnFrontend?: boolean } = chunk("a");
+    const { source } = makeSource([a]);
+    const withId = Object.assign(source, { rpcId: 5 });
+
+    queue.invalidateSourceCache(withId);
+
+    expect(a.staleOnFrontend).toBe(true);
+    expect(a.state).toBe(ChunkState.QUEUED);
+    expect(source.readFresh).not.toHaveBeenCalled();
+    expect(queue.rpc.invoke).toHaveBeenCalledWith("Chunk.update", {
+      source: 5,
+    });
   });
 });

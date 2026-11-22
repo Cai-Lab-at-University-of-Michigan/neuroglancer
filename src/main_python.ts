@@ -39,8 +39,11 @@ import {
   bindDefaultCopyHandler,
   bindDefaultPasteHandler,
 } from "#src/ui/default_clipboard_handling.js";
+import { registerDefaultCommands } from "#src/ui/default_commands.js";
 import { setDefaultInputEventBindings } from "#src/ui/default_input_event_bindings.js";
 import { makeDefaultViewer } from "#src/ui/default_viewer.js";
+import { bindScreenshotDialog } from "#src/ui/screenshot_menu.js";
+import { bindStateEditor } from "#src/ui/state_editor.js";
 import { bindTitle } from "#src/ui/title.js";
 import { UrlHashBinding } from "#src/ui/url_hash_binding.js";
 import { parseFixedLengthArray, verifyInt } from "#src/util/json.js";
@@ -237,4 +240,10 @@ volumeHandler.sendVolumeChunkResponseRequested.add((requestId, info) =>
 
 bindDefaultCopyHandler(viewer);
 bindDefaultPasteHandler(viewer);
+registerDefaultCommands(viewer.commandRegistry);
+// No command palette here: the page that embeds this viewer has its own panel
+// and shortcuts, and the palette (Ctrl+P, Cmd+P on a Mac) would open over the
+// viewer with commands that bypass that panel.
+bindStateEditor(viewer);
+bindScreenshotDialog(viewer);
 viewer.registerDisposer(bindTitle(viewer.title));

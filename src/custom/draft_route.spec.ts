@@ -705,7 +705,7 @@ describe("applyDraftMessage", () => {
     return {
       invalidated,
       sources: new Set<unknown>(sources),
-      invalidateCachedChunks: vi.fn(
+      refreshCachedChunks: vi.fn(
         async (s: ReturnType<typeof source>, keys: Iterable<string>) => {
           invalidated.set(s.name, [...keys].sort());
           return { refreshed: 1, skipped: 0, failed: 0, dropped: 2 };
@@ -857,7 +857,7 @@ describe("applyDraftMessage", () => {
       },
     };
     const queue = queueOf([coarse]);
-    queue.invalidateCachedChunks.mockImplementation(async () => {
+    queue.refreshCachedChunks.mockImplementation(async () => {
       order.push("chunks");
       return { refreshed: 0, skipped: 0, failed: 0, dropped: 1 };
     });
@@ -885,7 +885,7 @@ describe("applyDraftMessage", () => {
     );
 
     expect(result).toMatchObject({ ignored: true, older: false, refreshed: 0 });
-    expect(queue.invalidateCachedChunks).not.toHaveBeenCalled();
+    expect(queue.refreshCachedChunks).not.toHaveBeenCalled();
   });
 
   it("a release, a duplicate and an old copy read nothing", async () => {
@@ -920,7 +920,7 @@ describe("applyDraftMessage", () => {
       gap: false,
       refreshed: 0,
     });
-    expect(queue.invalidateCachedChunks).not.toHaveBeenCalled();
+    expect(queue.refreshCachedChunks).not.toHaveBeenCalled();
   });
 
   it("passes on a gap, with the generation the viewer had", async () => {
